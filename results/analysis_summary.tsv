@@ -1,0 +1,10 @@
+metric	value
+total_samples	147
+psoriasis_lesional_samples	28
+healthy_control_samples	38
+paired_psoriasis_samples	54
+tested_genes_primary	21469
+DEGs_FDR_lt_0.05_absLFC_gt_1	4527
+Reactome_pathways_FDR_lt_0.05	667
+Top_up_pathway	Cell Cycle, Mitotic
+Top_down_pathway	Non-integrin membrane-ECM interactions
