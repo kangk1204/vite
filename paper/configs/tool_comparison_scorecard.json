@@ -1,0 +1,101 @@
+{
+  "criteria": [
+    {
+      "id": "direct_public_data_intake",
+      "label": "Direct public-data intake",
+      "description": "Can the workflow start from public datasets without a separate local stats-prep environment?"
+    },
+    {
+      "id": "standalone_report_delivery",
+      "label": "Standalone report delivery",
+      "description": "Can the workflow emit a shareable offline report artifact rather than only an interactive session?"
+    },
+    {
+      "id": "provenance_capture",
+      "label": "Structured provenance capture",
+      "description": "Does the workflow preserve explicit dataset/contrast/run metadata in the output artifacts?"
+    },
+    {
+      "id": "batch_multi_cohort_reruns",
+      "label": "Batch multi-cohort reruns",
+      "description": "Can the workflow be rerun across multiple cohorts under one contract rather than ad hoc one-off runs?"
+    },
+    {
+      "id": "offline_shareability",
+      "label": "Offline shareability",
+      "description": "Can the main analysis artifact be reviewed offline without a hosted server dependency?"
+    },
+    {
+      "id": "publication_ready_exports",
+      "label": "Publication-ready exports",
+      "description": "Does the workflow emphasize figure/report artifacts that can be reused in a manuscript context?"
+    }
+  ],
+  "tools": [
+    {
+      "tool": "Pathway Network Viewer",
+      "source": "Local repository workflow and generated benchmark outputs",
+      "notes": "Public GEO intake, provenance-tagged standalone HTML reports, and manifest-driven reruns are first-class features.",
+      "scores": {
+        "direct_public_data_intake": 2,
+        "standalone_report_delivery": 2,
+        "provenance_capture": 2,
+        "batch_multi_cohort_reruns": 2,
+        "offline_shareability": 2,
+        "publication_ready_exports": 2
+      }
+    },
+    {
+      "tool": "GeneTonic",
+      "source": "https://genomebiology.biomedcentral.com/articles/10.1186/s13059-021-02333-3",
+      "notes": "Strong local RNA-seq interpretation environment once DESeq2-style objects already exist, but not centered on public-data intake or manifest-level standalone report delivery.",
+      "scores": {
+        "direct_public_data_intake": 0,
+        "standalone_report_delivery": 1,
+        "provenance_capture": 1,
+        "batch_multi_cohort_reruns": 1,
+        "offline_shareability": 1,
+        "publication_ready_exports": 1
+      }
+    },
+    {
+      "tool": "GREIN",
+      "source": "https://www.nature.com/articles/s41598-019-43935-8",
+      "notes": "Public-data reuse is strong, but the workflow centers on a hosted re-analysis environment rather than a provenance-tagged standalone report contract.",
+      "scores": {
+        "direct_public_data_intake": 2,
+        "standalone_report_delivery": 0,
+        "provenance_capture": 0,
+        "batch_multi_cohort_reruns": 1,
+        "offline_shareability": 0,
+        "publication_ready_exports": 1
+      }
+    },
+    {
+      "tool": "pathlinkR",
+      "source": "https://doi.org/10.1093/bioinformatics/btaf117",
+      "notes": "Scriptable package-level pathway analysis with figure outputs, but not a public-data intake or standalone delivery workflow.",
+      "scores": {
+        "direct_public_data_intake": 0,
+        "standalone_report_delivery": 0,
+        "provenance_capture": 0,
+        "batch_multi_cohort_reruns": 1,
+        "offline_shareability": 1,
+        "publication_ready_exports": 1
+      }
+    },
+    {
+      "tool": "EnrichmentMap:RNASeq",
+      "source": "https://pubmed.ncbi.nlm.nih.gov/40861393/",
+      "notes": "Interactive enrichment exploration is the focus, not provenance-tagged standalone delivery or multi-cohort rerun contracts.",
+      "scores": {
+        "direct_public_data_intake": 0,
+        "standalone_report_delivery": 0,
+        "provenance_capture": 0,
+        "batch_multi_cohort_reruns": 0,
+        "offline_shareability": 0,
+        "publication_ready_exports": 1
+      }
+    }
+  ]
+}

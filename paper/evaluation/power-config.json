@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "seed": 20261110,
+  "startN": 24,
+  "simulations": 1000,
+  "alpha": 0.05,
+  "targetPower": 0.8,
+  "errorReduction": 0.1,
+  "baselineError": [
+    0.2,
+    0.35,
+    0.5
+  ],
+  "participantSD": [
+    0.5,
+    1.0
+  ],
+  "taskSD": [
+    0.5,
+    1.0
+  ],
+  "slopeSD": [
+    0.25,
+    0.5
+  ],
+  "status": "conservative-planning-grid-review-after-pilot-before-preregistration",
+  "casesPath": "paper/evaluation/case-manifest.seed.json"
+}

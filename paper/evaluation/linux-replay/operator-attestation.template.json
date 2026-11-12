@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "state": "awaiting_external_operator",
+  "operatorId": null,
+  "affiliationOrVerifiableRecord": null,
+  "relationshipToImplementation": null,
+  "performedAtUtc": null,
+  "machineAndOperatingSystem": null,
+  "receivedKitManifestSha256": null,
+  "sourceArchiveSha256": null,
+  "resultStatusSha256": null,
+  "manualInterventionsFile": "audit/manual-interventions.jsonl",
+  "notes": null,
+  "signedOrAttributableRecord": null
+}

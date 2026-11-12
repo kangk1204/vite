@@ -1,15 +1,19 @@
 import * as XLSX from 'xlsx';
+import { adaptViewerData, createUnverifiedEvidence } from './evidence';
 import {
   findReferencePathway,
-  getHuriPpiNeighbors,
-  getStringPpiNeighbors,
+  getReferenceAssetVersion,
   getReferenceSummary,
   lookupCanonicalSymbol,
-} from '../reference';
+} from '../reference/symbols';
+import {
+  getHuriPpiNeighbors,
+  getStringPpiNeighbors,
+} from '../reference/ppi';
+import { ensureReferenceAssetsLoaded } from '../reference/assets';
 import type {
   BuilderSummary,
   EnrichmentCurve,
-  EnrichmentPoint,
   GeneRecord,
   PathwayRecord,
   ProjectMeta,
@@ -17,6 +21,7 @@ import type {
   ViewerData,
   ViewerEdge,
   ViewerNode,
+  ViewerProvenance,
   ViewerSampleMeta,
   WorkbookParseResult,
 } from '../types';
@@ -24,7 +29,7 @@ import {
   dedupe,
   hasRequiredColumns,
   normalizeCollectionName,
-  normalizeSheetRows,
+  normalizeColumnKey,
   normalizeSymbolToken,
   parseNumber,
   splitGeneList,
@@ -52,13 +57,137 @@ const REQUIRED_PATHWAY_COLUMNS = [
   'padj',
   'leading_edge_genes',
 ];
-const REQUIRED_GENE_COLUMN_SET = new Set(REQUIRED_GENE_COLUMNS);
-const SIGNIFICANCE_THRESHOLD = 0.25;
+const REQUIRED_GENE_COLUMN_SET = new Set([...REQUIRED_GENE_COLUMNS, 'statistics_reason', 'missing_reason', 'unshrunk_log2fc', 'lfc_se']);
+const SIGNIFICANCE_THRESHOLD = 0.05;
 const MAX_ISSUES = 400;
 const HURI_EDGE_SCORE = 850;
 const MAX_SAMPLE_VALUES_PER_GENE = 160;
+const MAX_WORKBOOK_BYTES = 24 * 1024 * 1024;
+const WORKBOOK_PARSE_OPTIONS: XLSX.ParsingOptions = {
+  type: 'array',
+  sheets: ['Project', 'Genes', 'Pathways', 'Samples', 'GeneLabels', 'CustomPPI'],
+  cellFormula: false,
+  cellHTML: false,
+  cellNF: false,
+  cellStyles: false,
+  bookDeps: false,
+  bookFiles: false,
+  bookProps: false,
+  bookSheets: false,
+  bookVBA: false,
+  WTF: false,
+};
+const PROVENANCE_PROJECT_COLUMNS = [
+  'dataset_identifier',
+  'contrast_definition',
+  'sample_group_source',
+  'batch_handling_rule',
+  'analysis_timestamp',
+  'git_commit',
+  'reference_asset_version',
+  'notes',
+] as const;
+
+// Schema headers are case-insensitive; sample identifiers are not. Applying the
+// schema normalizer to arbitrary expression columns merges distinct samples.
+const WORKBOOK_SCHEMAS: Record<string, ReadonlySet<string>> = {
+  Project: new Set([...REQUIRED_PROJECT_COLUMNS, ...PROVENANCE_PROJECT_COLUMNS, 'species', 'schema_version', 'analysis_method']),
+  Genes: REQUIRED_GENE_COLUMN_SET,
+  Pathways: new Set([...REQUIRED_PATHWAY_COLUMNS, 'pathway_id', 'statistics_reason', 'missing_reason']),
+  Samples: new Set(['sample_id', 'sample', 'id', 'group', 'sample_group', 'condition', 'label', 'title', 'group_label', 'batch', 'batch_id', 'gene_symbol']),
+  GeneLabels: new Set(['gene_symbol', 'label', 'priority']),
+  CustomPPI: new Set(['gene_a', 'gene_b', 'score']),
+};
+const UNSAFE_COLUMN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+export function lookupCanonicalSymbolForGeo(symbol: string): string | null {
+  return lookupCanonicalSymbol(symbol);
+}
+
+export function getReferenceAssetVersionForGeo(): string {
+  return getReferenceAssetVersion();
+}
+
+export async function ensureWorkbookRuntimeReady(): Promise<void> {
+  await ensureReferenceAssetsLoaded();
+}
+
+interface ParsedProjectSheet {
+  project: ProjectMeta;
+  provenance?: ViewerProvenance;
+}
 
 type SheetRow = Record<string, unknown>;
+export interface WorkbookSheetRowsInput {
+  projectRows: SheetRow[];
+  genesRows: SheetRow[];
+  pathwayRows: SheetRow[];
+  sampleRows?: SheetRow[];
+  labelRows?: SheetRow[];
+  customPpiRows?: SheetRow[];
+}
+
+function canonicalWorkbookColumn(sheetName: string, key: string): string {
+  const normalized = normalizeColumnKey(key);
+  return WORKBOOK_SCHEMAS[sheetName]?.has(normalized) ? normalized : key;
+}
+
+function validateColumnIdentities(sheetName: string, headers: string[], issues: ValidationIssue[]): void {
+  const seen = new Map<string, string>();
+  for (const header of headers) {
+    if (!header.trim()) continue;
+    const key = canonicalWorkbookColumn(sheetName, header);
+    if (UNSAFE_COLUMN_KEYS.has(normalizeColumnKey(header))) {
+      pushIssue(issues, 'error', `Unsafe column name "${header}".`, sheetName);
+    } else if (seen.has(key)) {
+      pushIssue(issues, 'error', `Duplicate column "${key}" after schema normalization ("${seen.get(key)}" and "${header}").`, sheetName);
+    } else seen.set(key, header);
+  }
+}
+
+function normalizeWorkbookRows(rows: SheetRow[], sheetName: string, issues: ValidationIssue[]): SheetRow[] {
+  validateColumnIdentities(sheetName, dedupe(rows.flatMap(row => Object.keys(row))), issues);
+  return rows.map(row => {
+    const normalized: SheetRow = Object.create(null);
+    for (const [key, value] of Object.entries(row)) {
+      if (!UNSAFE_COLUMN_KEYS.has(normalizeColumnKey(key))) normalized[canonicalWorkbookColumn(sheetName, key)] = value;
+    }
+    return normalized;
+  });
+}
+
+function resolveExpressionColumns(
+  genesRows: SheetRow[], sampleRows: SheetRow[], samplesById: Record<string, ViewerSampleMeta>, issues: ValidationIssue[],
+): Map<string, ViewerSampleMeta> {
+  const exact = new Map(Object.values(samplesById).map(sample => [sample.id, sample]));
+  const aliases = new Map<string, Map<string, ViewerSampleMeta>>();
+  for (const sample of exact.values()) {
+    for (const alias of [sample.id, `sample_${sample.id}`]) {
+      const key = normalizeColumnKey(alias);
+      const entries = aliases.get(key) ?? new Map<string, ViewerSampleMeta>();
+      entries.set(sample.id, sample); aliases.set(key, entries);
+    }
+  }
+  const numericColumns = (rows: SheetRow[], schema: ReadonlySet<string>) => rows.flatMap(row =>
+    Object.entries(row).filter(([key, value]) => !schema.has(key) && Number.isFinite(parseNumber(value))).map(([key]) => key));
+  const columns = dedupe([...numericColumns(genesRows, WORKBOOK_SCHEMAS.Genes), ...numericColumns(sampleRows.filter(row => row.gene_symbol), WORKBOOK_SCHEMAS.Samples)]);
+  const resolved = new Map<string, ViewerSampleMeta>();
+  for (const column of columns) {
+    const direct = exact.get(column);
+    const prefixed = /^sample_/i.test(column) ? exact.get(column.slice(7)) : undefined;
+    const exactCandidates = new Map([direct, prefixed].filter((sample): sample is ViewerSampleMeta => Boolean(sample)).map(sample => [sample.id, sample]));
+    const candidates = exactCandidates.size ? exactCandidates : aliases.get(normalizeColumnKey(column));
+    if (candidates && candidates.size > 1) {
+      pushIssue(issues, 'error', `Ambiguous sample expression column "${column}" matches multiple sample IDs: ${Array.from(candidates.keys()).join(', ')}. Use an exact, unambiguous sample identifier.`, 'Samples');
+    } else if (candidates?.size === 1) resolved.set(column, candidates.values().next().value!);
+  }
+  return resolved;
+}
+
+function nullableStatistic(value: unknown, probability = false): number | null {
+  const parsed = parseNumber(value);
+  return Number.isFinite(parsed) && (!probability || (parsed >= 0 && parsed <= 1)) ? parsed : null;
+}
 
 function sheetRows(workbook: XLSX.WorkBook, sheetName: string): SheetRow[] {
   const sheet = workbook.Sheets[sheetName];
@@ -101,7 +230,7 @@ function upsertSampleMetadata(
   sampleId: string,
   nextFields: Partial<ViewerSampleMeta> = {},
 ): void {
-  if (!sampleId) {
+  if (!sampleId || sampleId === '__proto__' || sampleId === 'constructor' || sampleId === 'prototype') {
     return;
   }
   const existing = samplesById[sampleId] ?? { id: sampleId };
@@ -116,7 +245,7 @@ function mergeSampleValues(
   existing: Record<string, number>,
   incoming: Record<string, number>,
 ): { sampleValues: Record<string, number>; sampleCount: number; truncated: boolean } {
-  const merged = { ...existing };
+  const merged: Record<string, number> = Object.assign(Object.create(null), existing);
   let sampleCount = Object.keys(merged).length;
   let truncated = false;
 
@@ -162,10 +291,10 @@ function mergeGeneRecord(
 
   const significanceScore = (gene: GeneRecord): number => {
     if (Number.isFinite(gene.padj)) {
-      return gene.padj;
+      return gene.padj!;
     }
     if (Number.isFinite(gene.pvalue)) {
-      return gene.pvalue;
+      return gene.pvalue!;
     }
     return Number.POSITIVE_INFINITY;
   };
@@ -190,69 +319,108 @@ function mergeGeneRecord(
 }
 
 function buildEnrichmentCurve(
-  rankedGenes: GeneRecord[],
+  rankedGenes: Array<Pick<GeneRecord, 'symbol' | 'rankMetric'>>,
   geneSet: Set<string>,
 ): EnrichmentCurve {
-  if (!rankedGenes.length || !geneSet.size) {
-    return { points: [{ index: 0, value: 0 }], hitIndices: [], maxAbsValue: 0 };
-  }
-
-  let hitCount = 0;
-  let hitWeight = 0;
-  const isHitByIndex = new Array<boolean>(rankedGenes.length);
-  rankedGenes.forEach((gene, index) => {
-    const isHit = geneSet.has(gene.symbol);
-    isHitByIndex[index] = isHit;
-    if (!isHit) {
-      return;
-    }
-    hitCount += 1;
-    hitWeight += Math.abs(gene.rankMetric || 1);
-  });
-
-  if (!hitCount) {
-    return {
-      points: rankedGenes.map((_, index) => ({ index, value: 0 })),
-      hitIndices: [],
-      maxAbsValue: 0,
-    };
-  }
-
-  const normalizedHitWeight = hitWeight || 1;
-  const missWeight = rankedGenes.length === hitCount ? 0 : 1 / (rankedGenes.length - hitCount);
-
-  let running = 0;
-  let maxAbsValue = 0;
-  const points: EnrichmentPoint[] = [{ index: 0, value: 0 }];
   const hitIndices: number[] = [];
-
-  rankedGenes.forEach((gene, idx) => {
-    if (isHitByIndex[idx]) {
-      running += Math.abs(gene.rankMetric || 1) / normalizedHitWeight;
-      hitIndices.push(idx + 1);
-    } else {
-      running -= missWeight;
-    }
-
-    maxAbsValue = Math.max(maxAbsValue, Math.abs(running));
-    points.push({
-      index: idx + 1,
-      value: Number(running.toFixed(6)),
-      gene: gene.symbol,
-      isHit: isHitByIndex[idx],
-    });
+  let hitWeight = 0;
+  rankedGenes.forEach((gene, index) => {
+    if (geneSet.has(gene.symbol)) { hitIndices.push(index + 1); hitWeight += Math.abs(gene.rankMetric ?? 0); }
   });
-
-  return { points, hitIndices, maxAbsValue };
+  if (!hitIndices.length || !hitWeight) return {
+    representation: 'ranked-hits-v1', points: [], hitIndices: [], maxAbsValue: 0,
+    unavailableReason: 'The supplied rank universe has no nonzero pathway-hit weight.',
+  };
+  const hits = new Set(hitIndices);
+  const missWeight = rankedGenes.length === hits.size ? 0 : 1 / (rankedGenes.length - hits.size);
+  let running = 0, maxAbsValue = 0;
+  rankedGenes.forEach((gene, index) => {
+    running += hits.has(index + 1) ? Math.abs(gene.rankMetric ?? 0) / hitWeight : -missWeight;
+    maxAbsValue = Math.max(maxAbsValue, Math.abs(running));
+  });
+  // Store the rank universe once at report level, not once per pathway.
+  return { representation: 'ranked-hits-v1', points: [], hitIndices, maxAbsValue };
 }
 
 function buildEdgeKey(source: string, target: string): string {
   return [source, target].sort().join('::');
 }
 
+interface PathwayNetworkContext {
+  knownGenes: Set<string>;
+  stringNeighborsByGene: Map<string, Array<[string, number]>>;
+  huriNeighborsByGene: Map<string, string[]>;
+  customEdgesByGene: Map<string, ViewerEdge[]>;
+}
+
+function buildPathwayNetworkContext(
+  genesBySymbol: Map<string, GeneRecord>,
+  customPpi: Map<string, ViewerEdge>,
+): PathwayNetworkContext {
+  const knownGenes = new Set(genesBySymbol.keys());
+  const stringNeighborsByGene = new Map<string, Array<[string, number]>>();
+  const huriNeighborsByGene = new Map<string, string[]>();
+  const customEdgesByGene = new Map<string, ViewerEdge[]>();
+
+  for (const edge of customPpi.values()) {
+    if (edge.source === edge.target || !knownGenes.has(edge.source) || !knownGenes.has(edge.target)) {
+      continue;
+    }
+    const sourceEdges = customEdgesByGene.get(edge.source);
+    if (sourceEdges) {
+      sourceEdges.push(edge);
+    } else {
+      customEdgesByGene.set(edge.source, [edge]);
+    }
+    const targetEdges = customEdgesByGene.get(edge.target);
+    if (targetEdges) {
+      targetEdges.push(edge);
+    } else {
+      customEdgesByGene.set(edge.target, [edge]);
+    }
+  }
+
+  return {
+    knownGenes,
+    stringNeighborsByGene,
+    huriNeighborsByGene,
+    customEdgesByGene,
+  };
+}
+
+function getStringNeighborsForGene(
+  context: PathwayNetworkContext,
+  gene: string,
+): Array<[string, number]> {
+  const cached = context.stringNeighborsByGene.get(gene);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const filtered = getStringPpiNeighbors(gene).filter(
+    ([neighbor]) => neighbor !== gene && context.knownGenes.has(neighbor),
+  );
+  context.stringNeighborsByGene.set(gene, filtered);
+  return filtered;
+}
+
+function getHuriNeighborsForGene(
+  context: PathwayNetworkContext,
+  gene: string,
+): string[] {
+  const cached = context.huriNeighborsByGene.get(gene);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const filtered = getHuriPpiNeighbors(gene)
+    .map(([neighbor]) => neighbor)
+    .filter((neighbor) => neighbor !== gene && context.knownGenes.has(neighbor));
+  context.huriNeighborsByGene.set(gene, filtered);
+  return filtered;
+}
+
 function buildNetworkEdges(
   genes: string[],
-  customPpi: Map<string, ViewerEdge>,
+  context: PathwayNetworkContext,
 ): ViewerEdge[] {
   const geneSet = new Set(genes);
   const edges = new Map<string, ViewerEdge>();
@@ -290,25 +458,30 @@ function buildNetworkEdges(
   };
 
   genes.forEach((gene) => {
-    for (const [neighbor, score] of getStringPpiNeighbors(gene)) {
-      if (!geneSet.has(neighbor) || gene === neighbor) {
+    const stringNeighbors = getStringNeighborsForGene(context, gene);
+    for (const [neighbor, score] of stringNeighbors) {
+      if (!geneSet.has(neighbor)) {
         continue;
       }
       mergeEdge(gene, neighbor, score, { isString: true, isHuRI: false, isCustom: false });
     }
-    for (const [neighbor] of getHuriPpiNeighbors(gene)) {
-      if (!geneSet.has(neighbor) || gene === neighbor) {
+
+    const huriNeighbors = getHuriNeighborsForGene(context, gene);
+    for (const neighbor of huriNeighbors) {
+      if (!geneSet.has(neighbor)) {
         continue;
       }
       mergeEdge(gene, neighbor, HURI_EDGE_SCORE, { isString: false, isHuRI: true, isCustom: false });
     }
-  });
 
-  for (const [, edge] of customPpi) {
-    if (geneSet.has(edge.source) && geneSet.has(edge.target)) {
+    const customEdges = context.customEdgesByGene.get(gene) ?? [];
+    for (const edge of customEdges) {
+      if (!geneSet.has(edge.source) || !geneSet.has(edge.target)) {
+        continue;
+      }
       mergeEdge(edge.source, edge.target, edge.score, { isString: false, isHuRI: false, isCustom: true });
     }
-  }
+  });
 
   return Array.from(edges.values()).sort((a, b) => b.score - a.score);
 }
@@ -319,20 +492,17 @@ function buildViewerNodes(
   leadingEdge: Set<string>,
 ): ViewerNode[] {
   return genes
-    .map((symbol) => {
+    .map<ViewerNode | null>((symbol) => {
       const gene = genesBySymbol.get(symbol);
       if (!gene) {
         return null;
       }
 
-      const significanceValue = Number.isFinite(gene.padj)
-        ? gene.padj
-        : Number.isFinite(gene.pvalue)
-          ? gene.pvalue
-          : 1;
+      const significanceValue = Number.isFinite(gene.padj) ? gene.padj! : 1;
 
       return {
         id: gene.symbol,
+        originalId: gene.originalSymbol,
         label: gene.label ?? gene.symbol,
         labelPriority: gene.labelPriority ?? 0,
         log2fc: gene.log2fc,
@@ -341,6 +511,7 @@ function buildViewerNodes(
         sizeMetric: Math.min(12, -Math.log10(Math.max(significanceValue, 1e-12))),
         conditionAMean: gene.conditionAMean,
         conditionBMean: gene.conditionBMean,
+        statisticsReason: gene.statisticsReason,
         sampleValues: gene.sampleValues,
         isLeadingEdge: leadingEdge.has(gene.symbol),
       } satisfies ViewerNode;
@@ -349,7 +520,7 @@ function buildViewerNodes(
     .sort((a, b) => b.sizeMetric - a.sizeMetric || b.labelPriority - a.labelPriority);
 }
 
-function parseProjectSheet(rows: SheetRow[], issues: ValidationIssue[]): ProjectMeta | null {
+function parseProjectSheet(rows: SheetRow[], issues: ValidationIssue[]): ParsedProjectSheet | null {
   if (!rows.length) {
     return null;
   }
@@ -389,16 +560,44 @@ function parseProjectSheet(rows: SheetRow[], issues: ValidationIssue[]): Project
     project.species = 'human';
   }
 
-  return project;
+  const provenanceFields = Object.fromEntries(
+    PROVENANCE_PROJECT_COLUMNS.map((key) => {
+      const normalized = String(row[key] ?? '').trim();
+      return [key, normalized || undefined];
+    }),
+  ) as Record<(typeof PROVENANCE_PROJECT_COLUMNS)[number], string | undefined>;
+
+  const provenance: ViewerProvenance = {
+    datasetIdentifier: provenanceFields.dataset_identifier,
+    contrastDefinition:
+      provenanceFields.contrast_definition || `${project.conditionB} versus ${project.conditionA}`,
+    sampleGroupSource: provenanceFields.sample_group_source,
+    batchHandlingRule: provenanceFields.batch_handling_rule,
+    analysisTimestamp: provenanceFields.analysis_timestamp,
+    gitCommit: provenanceFields.git_commit,
+    referenceAssetVersion: provenanceFields.reference_asset_version || getReferenceAssetVersion(),
+    notes: provenanceFields.notes,
+  };
+
+  return {
+    project,
+    provenance,
+  };
 }
 
 export async function parseWorkbookFile(file: File): Promise<WorkbookParseResult> {
+  await ensureWorkbookRuntimeReady();
+  if (file.size > MAX_WORKBOOK_BYTES) {
+    throw new Error(
+      `Workbook is too large (${(file.size / (1024 * 1024)).toFixed(1)} MiB). ` +
+        `Use a ${MAX_WORKBOOK_BYTES / (1024 * 1024)} MiB or smaller PathwayViewer workbook.`,
+    );
+  }
   const buffer = await file.arrayBuffer();
   return parseWorkbookBuffer(buffer);
 }
 
-export function parseWorkbookBuffer(buffer: ArrayBuffer): WorkbookParseResult {
-  const workbook = XLSX.read(buffer, { type: 'array' });
+export function parseWorkbookRows(rows: WorkbookSheetRowsInput): WorkbookParseResult {
   const issues: ValidationIssue[] = [];
   const summary: BuilderSummary = {
     totalGenes: 0,
@@ -408,12 +607,12 @@ export function parseWorkbookBuffer(buffer: ArrayBuffer): WorkbookParseResult {
     unknownGenes: 0,
   };
 
-  const projectRows = normalizeSheetRows(sheetRows(workbook, 'Project'));
-  const genesRows = normalizeSheetRows(sheetRows(workbook, 'Genes'));
-  const pathwayRows = normalizeSheetRows(sheetRows(workbook, 'Pathways'));
-  const sampleRows = normalizeSheetRows(sheetRows(workbook, 'Samples'));
-  const labelRows = normalizeSheetRows(sheetRows(workbook, 'GeneLabels'));
-  const customPpiRows = normalizeSheetRows(sheetRows(workbook, 'CustomPPI'));
+  const projectRows = normalizeWorkbookRows(rows.projectRows ?? [], 'Project', issues);
+  const genesRows = normalizeWorkbookRows(rows.genesRows ?? [], 'Genes', issues);
+  const pathwayRows = normalizeWorkbookRows(rows.pathwayRows ?? [], 'Pathways', issues);
+  const sampleRows = normalizeWorkbookRows(rows.sampleRows ?? [], 'Samples', issues);
+  const labelRows = normalizeWorkbookRows(rows.labelRows ?? [], 'GeneLabels', issues);
+  const customPpiRows = normalizeWorkbookRows(rows.customPpiRows ?? [], 'CustomPPI', issues);
   const canonicalSymbolCache = new Map<string, string | null>();
   const toCanonicalSymbol = (value: unknown): string | null => {
     const normalizedToken = normalizeSymbolToken(String(value ?? ''));
@@ -434,14 +633,12 @@ export function parseWorkbookBuffer(buffer: ArrayBuffer): WorkbookParseResult {
   if (!genesRows.length) {
     pushIssue(issues, 'error', 'Missing required sheet: Genes');
   }
-  if (!pathwayRows.length) {
-    pushIssue(issues, 'error', 'Missing required sheet: Pathways');
-  }
 
-  const project = parseProjectSheet(projectRows, issues);
-  if (!project) {
+  const parsedProject = parseProjectSheet(projectRows, issues);
+  if (!parsedProject) {
     return { viewerData: null, issues, summary };
   }
+  const { project, provenance: parsedProvenance } = parsedProject;
 
   const missingGeneColumns = genesRows.length
     ? hasRequiredColumns(genesRows, REQUIRED_GENE_COLUMNS)
@@ -470,6 +667,27 @@ export function parseWorkbookBuffer(buffer: ArrayBuffer): WorkbookParseResult {
   const warnedUnknownGeneSymbols = new Set<string>();
   const warnedNormalizedSymbols = new Set<string>();
   const samplesById: Record<string, ViewerSampleMeta> = {};
+  sampleRows.forEach((row) => {
+    const sampleId = String(row.sample_id ?? row.sample ?? row.id ?? '').trim();
+    if (!sampleId) {
+      return;
+    }
+    if (UNSAFE_COLUMN_KEYS.has(sampleId) || Object.hasOwn(samplesById, sampleId)) {
+      pushIssue(issues, 'error', `Duplicate or unsafe sample identifier "${sampleId}".`, 'Samples');
+      return;
+    }
+    const groupRaw = String(row.group ?? row.sample_group ?? row.condition ?? '').trim();
+    const groupKey =
+      groupRaw === 'A' || groupRaw === 'B' || groupRaw === 'U'
+        ? groupRaw
+        : undefined;
+    upsertSampleMetadata(samplesById, sampleId, {
+      label: String(row.label ?? row.title ?? sampleId).trim() || sampleId,
+      groupKey,
+      groupLabel: String(row.group_label || groupRaw).trim() || undefined,
+      batch: String(row.batch ?? row.batch_id ?? '').trim() || undefined,
+    });
+  });
   labelRows.forEach((row) => {
     const canonical = toCanonicalSymbol(row.gene_symbol);
     if (!canonical) {
@@ -481,7 +699,10 @@ export function parseWorkbookBuffer(buffer: ArrayBuffer): WorkbookParseResult {
     });
   });
 
+  const sampleByColumn = resolveExpressionColumns(genesRows, sampleRows, samplesById, issues);
+  if (issues.some(issue => issue.level === 'error')) return { viewerData: null, issues, summary };
   const genesBySymbol = new Map<string, GeneRecord>();
+  const unmappedRankedGenes = new Map<string, number>();
   const unknownGenes = new Set<string>();
   const genesWithTruncatedSamples = new Set<string>();
   const sampleValueCountByGene = new Map<string, number>();
@@ -496,24 +717,32 @@ export function parseWorkbookBuffer(buffer: ArrayBuffer): WorkbookParseResult {
     const canonicalSymbol = toCanonicalSymbol(originalSymbol);
     if (!canonicalSymbol) {
       unknownGenes.add(originalSymbol);
+      const metric = nullableStatistic(row.rank_metric);
+      if (metric !== null) unmappedRankedGenes.set(originalSymbol, metric);
       const unknownKey = normalizeSymbolToken(originalSymbol);
       if (unknownKey && !warnedUnknownGeneSymbols.has(unknownKey)) {
         warnedUnknownGeneSymbols.add(unknownKey);
-        pushIssue(issues, 'warning', `Unrecognized gene symbol "${originalSymbol}" skipped.`, `Genes row ${index + 2}`);
+        pushIssue(issues, 'warning', `Unrecognized gene symbol "${originalSymbol}" omitted from the network; any finite rank remains in the ranked universe.`, `Genes row ${index + 2}`);
       }
       return;
     }
 
-    const sampleValues: Record<string, number> = {};
+    const sampleValues: Record<string, number> = Object.create(null);
     let sampleValueCount = 0;
     let truncatedGeneSamples = false;
     for (const [key, value] of Object.entries(row)) {
-      if (REQUIRED_GENE_COLUMN_SET.has(key) || value === '') {
+      if (
+        REQUIRED_GENE_COLUMN_SET.has(key) ||
+        value === '' ||
+        key === '__proto__' ||
+        key === 'constructor' ||
+        key === 'prototype'
+      ) {
         continue;
       }
       const numeric = parseNumber(value);
       if (Number.isFinite(numeric)) {
-        upsertSampleMetadata(samplesById, key);
+        upsertSampleMetadata(samplesById, key, sampleByColumn.get(key) ? { ...sampleByColumn.get(key), id: key } : {});
         if (Object.prototype.hasOwnProperty.call(sampleValues, key)) {
           sampleValues[key] = numeric;
           continue;
@@ -531,12 +760,13 @@ export function parseWorkbookBuffer(buffer: ArrayBuffer): WorkbookParseResult {
     const geneRecord: GeneRecord = {
       symbol: canonicalSymbol,
       originalSymbol,
-      log2fc: parseNumber(row.log2fc),
-      padj: parseNumber(row.padj),
-      pvalue: parseNumber(row.pvalue),
-      rankMetric: parseNumber(row.rank_metric),
-      conditionAMean: parseNumber(row.condition_a_mean),
-      conditionBMean: parseNumber(row.condition_b_mean),
+      log2fc: nullableStatistic(row.log2fc),
+      padj: nullableStatistic(row.padj, true),
+      pvalue: nullableStatistic(row.pvalue, true),
+      rankMetric: nullableStatistic(row.rank_metric),
+      conditionAMean: nullableStatistic(row.condition_a_mean),
+      conditionBMean: nullableStatistic(row.condition_b_mean),
+      statisticsReason: String(row.statistics_reason || row.missing_reason || '').trim() || undefined,
       sampleValues,
       label: labelEntry?.label,
       labelPriority: labelEntry?.priority,
@@ -544,10 +774,11 @@ export function parseWorkbookBuffer(buffer: ArrayBuffer): WorkbookParseResult {
 
     if (
       [geneRecord.log2fc, geneRecord.padj, geneRecord.pvalue, geneRecord.rankMetric].some(
-        (value) => Number.isNaN(value),
+        (value) => value === null,
       )
     ) {
-      pushIssue(issues, 'warning', `Gene row for ${canonicalSymbol} has non-numeric statistics.`, 'Genes');
+      geneRecord.statisticsReason ||= 'One or more statistics were not supplied or could not be tested.';
+      pushIssue(issues, 'warning', `Gene row for ${canonicalSymbol} has missing or invalid statistics; preserved as null.`, 'Genes');
     }
 
     if (
@@ -587,12 +818,17 @@ export function parseWorkbookBuffer(buffer: ArrayBuffer): WorkbookParseResult {
     }
 
     Object.entries(row).forEach(([key, value]) => {
-      if (key === 'gene_symbol' || key === 'sample_group') {
+      if (
+        WORKBOOK_SCHEMAS.Samples.has(key) ||
+        key === '__proto__' ||
+        key === 'constructor' ||
+        key === 'prototype'
+      ) {
         return;
       }
       const numeric = parseNumber(value);
       if (Number.isFinite(numeric)) {
-        upsertSampleMetadata(samplesById, key);
+        upsertSampleMetadata(samplesById, key, sampleByColumn.get(key) ? { ...sampleByColumn.get(key), id: key } : {});
         const hasExistingValue = Object.prototype.hasOwnProperty.call(gene.sampleValues, key);
         const currentSampleValueCount = sampleValueCountByGene.get(canonical) ?? Object.keys(gene.sampleValues).length;
         if (!hasExistingValue && currentSampleValueCount >= MAX_SAMPLE_VALUES_PER_GENE) {
@@ -629,9 +865,10 @@ export function parseWorkbookBuffer(buffer: ArrayBuffer): WorkbookParseResult {
     customPpi.set(buildEdgeKey(source, target), { source, target, score, isCustom: true });
   });
 
-  const rankedGenes = Array.from(genesBySymbol.values()).sort(
-    (left, right) => right.rankMetric - left.rankMetric || left.symbol.localeCompare(right.symbol),
+  const rankedGenes = [...Array.from(genesBySymbol.values()).filter(gene => gene.rankMetric !== null), ...Array.from(unmappedRankedGenes, ([symbol, rankMetric]) => ({ symbol, rankMetric }))].sort(
+    (left, right) => right.rankMetric! - left.rankMetric! || left.symbol.localeCompare(right.symbol),
   );
+  const networkContext = buildPathwayNetworkContext(genesBySymbol, customPpi);
 
   const pathways: PathwayRecord[] = [];
   const pathwayKeyCounts = new Map<string, number>();
@@ -690,10 +927,9 @@ export function parseWorkbookBuffer(buffer: ArrayBuffer): WorkbookParseResult {
       pushIssue(
         issues,
         'warning',
-        `Pathway "${pathwayName}" has no genes present in the Genes sheet and was skipped.`,
+        `Pathway "${pathwayName}" has no genes present in the Genes sheet; statistics are retained without network nodes.`,
         'Pathways',
       );
-      return;
     }
 
     const nodes = buildViewerNodes(
@@ -703,7 +939,7 @@ export function parseWorkbookBuffer(buffer: ArrayBuffer): WorkbookParseResult {
     );
     const edges = buildNetworkEdges(
       allGenes.length ? allGenes : availableLeadingEdge,
-      customPpi,
+      networkContext,
     );
 
     const pathwayGeneSet = new Set(referencePathway ? allGenes : availableLeadingEdge);
@@ -723,8 +959,8 @@ export function parseWorkbookBuffer(buffer: ArrayBuffer): WorkbookParseResult {
       );
     }
 
-    const parsedNes = parseNumber(row.nes);
-    const parsedPadj = parseNumber(row.padj);
+    const parsedNes = nullableStatistic(row.nes);
+    const parsedPadj = nullableStatistic(row.padj, true);
     if (!Number.isFinite(parsedNes) || !Number.isFinite(parsedPadj)) {
       pushIssue(
         issues,
@@ -741,6 +977,8 @@ export function parseWorkbookBuffer(buffer: ArrayBuffer): WorkbookParseResult {
       collection,
       nes: parsedNes,
       padj: parsedPadj,
+      statisticsReason: String(row.statistics_reason || row.missing_reason || '').trim() || (parsedNes === null || parsedPadj === null ? 'NES or FDR was not supplied or could not be tested.' : undefined),
+      source: { table: 'Pathways', row: index + 1 },
       leadingEdgeGenes: availableLeadingEdge,
       allGenes: allGenes.length ? allGenes : availableLeadingEdge,
       hasReferenceMembership: Boolean(referencePathway),
@@ -764,12 +1002,12 @@ export function parseWorkbookBuffer(buffer: ArrayBuffer): WorkbookParseResult {
   });
 
   pathways.sort((left, right) => {
-    const leftPadj = Number.isFinite(left.padj) ? left.padj : Number.POSITIVE_INFINITY;
-    const rightPadj = Number.isFinite(right.padj) ? right.padj : Number.POSITIVE_INFINITY;
+    const leftPadj = Number.isFinite(left.padj) ? left.padj! : Number.POSITIVE_INFINITY;
+    const rightPadj = Number.isFinite(right.padj) ? right.padj! : Number.POSITIVE_INFINITY;
     const leftSig = leftPadj <= SIGNIFICANCE_THRESHOLD ? 1 : 0;
     const rightSig = rightPadj <= SIGNIFICANCE_THRESHOLD ? 1 : 0;
-    const leftNes = Number.isFinite(left.nes) ? left.nes : Number.NEGATIVE_INFINITY;
-    const rightNes = Number.isFinite(right.nes) ? right.nes : Number.NEGATIVE_INFINITY;
+    const leftNes = Number.isFinite(left.nes) ? left.nes! : Number.NEGATIVE_INFINITY;
+    const rightNes = Number.isFinite(right.nes) ? right.nes! : Number.NEGATIVE_INFINITY;
     return rightSig - leftSig || rightNes - leftNes || left.pathwayName.localeCompare(right.pathwayName);
   });
 
@@ -778,7 +1016,7 @@ export function parseWorkbookBuffer(buffer: ArrayBuffer): WorkbookParseResult {
   let significantPathwayCount = 0;
   let fallbackPathwayCount = 0;
   for (const pathway of pathways) {
-    if (Number.isFinite(pathway.padj) && pathway.padj <= SIGNIFICANCE_THRESHOLD) {
+    if (pathway.padj !== null && Number.isFinite(pathway.padj) && pathway.padj <= SIGNIFICANCE_THRESHOLD) {
       significantPathwayCount += 1;
     }
     if (pathway.fallbackToLeadingEdge) {
@@ -790,8 +1028,7 @@ export function parseWorkbookBuffer(buffer: ArrayBuffer): WorkbookParseResult {
   summary.unknownGenes = unknownGenes.size;
 
   if (!pathways.length) {
-    pushIssue(issues, 'error', 'No pathways were successfully parsed from the workbook.', 'Pathways');
-    return { viewerData: null, issues, summary };
+    pushIssue(issues, 'info', 'No pathways were tested or supplied. No significance was inferred.', 'Pathways');
   }
 
   const viewerData: ViewerData = {
@@ -799,10 +1036,52 @@ export function parseWorkbookBuffer(buffer: ArrayBuffer): WorkbookParseResult {
     builtAt: new Date().toISOString(),
     significantPadjThreshold: SIGNIFICANCE_THRESHOLD,
     referenceSummary: getReferenceSummary(),
+    rankedGenes: rankedGenes.map(gene => ({ gene: gene.symbol, metric: gene.rankMetric! })),
+    provenance: parsedProvenance,
     issues,
     pathways,
     samplesById: Object.keys(samplesById).length ? samplesById : undefined,
   };
 
-  return { viewerData, issues, summary };
+  const evidence = createUnverifiedEvidence(viewerData);
+  const toSourceTable = (rows: SheetRow[]) => {
+    const columns = dedupe(rows.flatMap(row => Object.keys(row)));
+    return { columns, rows: rows.map(row => columns.map(column => {
+      const value = row[column];
+      return value === undefined || value === null || value === '' ? null : typeof value === 'number' && Number.isFinite(value) ? value : String(value);
+    })) };
+  };
+  evidence.sourceTables = { Project: toSourceTable(projectRows), Genes: toSourceTable(genesRows), Pathways: toSourceTable(pathwayRows), Samples: toSourceTable(sampleRows) };
+  evidence.pathways = Object.fromEntries(pathways.map(pathway => [pathway.pathwayId || pathway.key, { source: pathway.source }]));
+  return { viewerData: adaptViewerData({ ...viewerData, evidence }), issues, summary };
+}
+
+export function parseWorkbookBuffer(buffer: ArrayBuffer): WorkbookParseResult {
+  if (buffer.byteLength > MAX_WORKBOOK_BYTES) {
+    throw new Error(
+      `Workbook is too large (${(buffer.byteLength / (1024 * 1024)).toFixed(1)} MiB). ` +
+        `Use a ${MAX_WORKBOOK_BYTES / (1024 * 1024)} MiB or smaller PathwayViewer workbook.`,
+    );
+  }
+  const workbook = XLSX.read(buffer, WORKBOOK_PARSE_OPTIONS);
+  const headerIssues: ValidationIssue[] = [];
+  for (const sheetName of Object.keys(WORKBOOK_SCHEMAS)) {
+    const sheet = workbook.Sheets[sheetName];
+    if (!sheet) continue;
+    const range = XLSX.utils.decode_range(sheet['!ref'] || 'A1');
+    const headerRange = { s: range.s, e: { r: range.s.r, c: range.e.c } };
+    const headers = (XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, range: headerRange, raw: false, defval: '' })[0] ?? []).map(value => String(value ?? ''));
+    validateColumnIdentities(sheetName, headers, headerIssues);
+  }
+  if (headerIssues.length) return { viewerData: null, issues: headerIssues, summary: { totalGenes: 0, totalPathways: 0, significantPathways: 0, fallbackPathways: 0, unknownGenes: 0 } };
+  const missingSheets = ['Project', 'Genes', 'Pathways'].filter(name => !workbook.Sheets[name]);
+  if (missingSheets.length) return { viewerData: null, issues: missingSheets.map(name => ({ level: 'error' as const, message: `Missing required sheet: ${name}` })), summary: { totalGenes: 0, totalPathways: 0, significantPathways: 0, fallbackPathways: 0, unknownGenes: 0 } };
+  return parseWorkbookRows({
+    projectRows: sheetRows(workbook, 'Project'),
+    genesRows: sheetRows(workbook, 'Genes'),
+    pathwayRows: sheetRows(workbook, 'Pathways'),
+    sampleRows: sheetRows(workbook, 'Samples'),
+    labelRows: sheetRows(workbook, 'GeneLabels'),
+    customPpiRows: sheetRows(workbook, 'CustomPPI'),
+  });
 }

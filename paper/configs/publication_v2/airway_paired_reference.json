@@ -1,0 +1,23 @@
+{
+  "cohortKey": "airway_paired_reference",
+  "datasetIdentifier": "GSE52778 (airway subset)",
+  "projectTitle": "Paired airway smooth muscle dexamethasone reference",
+  "contrastName": "dexamethasone_vs_untreated",
+  "conditionA": "Untreated",
+  "conditionB": "Dexamethasone",
+  "rawCountsPath": "paper/outputs/publication_v2/airway_paired_reference/airway_counts.tsv",
+  "sampleMetadataPath": "paper/outputs/publication_v2/airway_paired_reference/airway_samples.tsv",
+  "geneIdentifierType": "symbol",
+  "designFormula": "~ donor + group",
+  "resultPrefix": "airway_paired",
+  "outputDir": "paper/outputs/publication_v2/airway_paired_reference/results",
+  "referencePath": "data/reference/ReactomePathways.gmt.zip",
+  "seed": 20261110,
+  "camera": true,
+  "bootstrapReplicates": 0,
+  "filterMinCount": 10,
+  "filterMinFraction": 0.15,
+  "sampleGroupSource": "airway package colData; each of four donors contributes one untreated and one treated sample.",
+  "writeFigures": false,
+  "notes": "Paired implementation reference; not a new biological finding."
+}

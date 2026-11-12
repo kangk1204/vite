@@ -1,0 +1,91 @@
+{
+  "manifestVersion": 1,
+  "outputRoot": "paper/outputs",
+  "primaryCohortKey": "gse121212_primary",
+  "jobs": [
+    {
+      "key": "gse121212_case_study",
+      "description": "Primary psoriasis case study, paired validation, and atopic dermatitis generalization from GSE121212",
+      "commands": [
+        ["Rscript", "scripts/analyze_gse121212_psoriasis.R"],
+        [".venv/bin/python", "scripts/render_psoriasis_pathway_figure.py"]
+      ]
+    }
+  ],
+  "cohorts": [
+    {
+      "key": "gse121212_primary",
+      "enabled": true,
+      "jobKey": "gse121212_case_study",
+      "datasetIdentifier": "GSE121212",
+      "diseaseArea": "psoriasis",
+      "role": "primary",
+      "sampleCount": 66,
+      "contrastName": "PSO_lesional_vs_CTRL_healthy",
+      "contrastDefinition": "Psoriasis lesional skin versus healthy control skin",
+      "sampleGroupSource": "Parsed from GEO sample titles in the series matrix",
+      "batchHandlingRule": "No explicit batch adjustment; GEO metadata did not expose a curated batch factor",
+      "notes": "Primary methods paper cohort.",
+      "workbookPath": "results/psoriasis_lesional_vs_healthy_pathway_viewer_input.xlsx",
+      "reportPath": "paper/outputs/reports/gse121212_primary.report.html",
+      "degTablePath": "results/psoriasis_lesional_vs_healthy_deseq2.tsv",
+      "pathwayTablePath": "results/psoriasis_lesional_vs_healthy_fgsea_reactome.tsv",
+      "summaryTablePath": "results/psoriasis_lesional_vs_healthy_analysis_summary.tsv",
+      "sampleMetadataPath": "results/psoriasis_lesional_vs_healthy_sample_metadata.tsv",
+      "figurePaths": [
+        "figures/figure1_pca_psoriasis_vs_healthy.pdf",
+        "figures/figure1_pca_psoriasis_vs_healthy.png",
+        "figures/figure2_volcano_psoriasis_vs_healthy.pdf",
+        "figures/figure2_volcano_psoriasis_vs_healthy.png",
+        "figures/figure3_reactome_fgsea_psoriasis_vs_healthy.pdf",
+        "figures/figure3_reactome_fgsea_psoriasis_vs_healthy.png",
+        "figures/figure4_pathway_concordance.pdf",
+        "figures/figure4_pathway_concordance.png",
+        "figures/figure5_selected_pathway_network_and_enrichment.pdf",
+        "figures/figure5_selected_pathway_network_and_enrichment.png"
+      ]
+    },
+    {
+      "key": "gse121212_paired",
+      "enabled": true,
+      "jobKey": "gse121212_case_study",
+      "datasetIdentifier": "GSE121212",
+      "diseaseArea": "psoriasis",
+      "role": "replication",
+      "sampleCount": 54,
+      "contrastName": "PSO_lesional_vs_nonlesional",
+      "contrastDefinition": "Matched psoriasis lesional skin versus paired non-lesional skin",
+      "sampleGroupSource": "Parsed from GEO sample titles in the series matrix and paired by patient_id",
+      "batchHandlingRule": "Patient ID modeled in DESeq2 design (~ patient_id + state); no separate batch covariate",
+      "notes": "Internal psoriasis replication cohort.",
+      "workbookPath": "results/psoriasis_lesional_vs_nonlesional_pathway_viewer_input.xlsx",
+      "reportPath": "paper/outputs/reports/gse121212_paired.report.html",
+      "degTablePath": "results/psoriasis_lesional_vs_nonlesional_paired_deseq2.tsv",
+      "pathwayTablePath": "results/psoriasis_lesional_vs_nonlesional_fgsea_reactome.tsv",
+      "summaryTablePath": "results/psoriasis_lesional_vs_nonlesional_analysis_summary.tsv",
+      "sampleMetadataPath": "results/psoriasis_lesional_vs_nonlesional_sample_metadata.tsv",
+      "figurePaths": []
+    },
+    {
+      "key": "gse121212_atopic_dermatitis",
+      "enabled": true,
+      "jobKey": "gse121212_case_study",
+      "datasetIdentifier": "GSE121212",
+      "diseaseArea": "atopic_dermatitis",
+      "role": "generalization",
+      "sampleCount": 65,
+      "contrastName": "AD_lesional_vs_CTRL_healthy",
+      "contrastDefinition": "Atopic dermatitis lesional skin versus healthy control skin",
+      "sampleGroupSource": "Parsed from GEO sample titles in the series matrix",
+      "batchHandlingRule": "No explicit batch adjustment; GEO metadata did not expose a curated batch factor",
+      "notes": "Non-psoriasis generalization cohort from the same public accession.",
+      "workbookPath": "results/atopic_dermatitis_lesional_vs_healthy_pathway_viewer_input.xlsx",
+      "reportPath": "paper/outputs/reports/gse121212_atopic_dermatitis.report.html",
+      "degTablePath": "results/atopic_dermatitis_lesional_vs_healthy_deseq2.tsv",
+      "pathwayTablePath": "results/atopic_dermatitis_lesional_vs_healthy_fgsea_reactome.tsv",
+      "summaryTablePath": "results/atopic_dermatitis_lesional_vs_healthy_analysis_summary.tsv",
+      "sampleMetadataPath": "results/atopic_dermatitis_lesional_vs_healthy_sample_metadata.tsv",
+      "figurePaths": []
+    }
+  ]
+}

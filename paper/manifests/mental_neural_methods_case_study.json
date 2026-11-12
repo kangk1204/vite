@@ -1,0 +1,189 @@
+{
+  "manifestVersion": 1,
+  "outputRoot": "paper/outputs/ymeth_pivot",
+  "primaryCohortKey": "gse68719_pd_primary",
+  "notes": [
+    "Active mental/neural manuscript manifest.",
+    "Psoriasis assets remain available as a legacy methods demonstration under paper/manifests/psoriasis_methods_case_study.json."
+  ],
+  "jobs": [
+    {
+      "key": "gse68719_pd_case_study",
+      "description": "Primary Parkinson disease bulk RNA-seq case study job",
+      "command": [
+        "Rscript",
+        "scripts/analyze_neural_bulk_cohort.R",
+        "paper/configs/gse68719_pd_primary.json"
+      ]
+    },
+    {
+      "key": "gse159699_ad_case_study",
+      "description": "Alzheimer disease neural replication bulk RNA-seq job",
+      "command": [
+        "Rscript",
+        "scripts/analyze_neural_bulk_cohort.R",
+        "paper/configs/gse159699_ad_replication.json"
+      ]
+    },
+    {
+      "key": "gse102556_mdd_case_study",
+      "description": "Major depressive disorder human dlPFC extension cohort",
+      "command": [
+        "Rscript",
+        "scripts/analyze_neural_bulk_cohort.R",
+        "paper/configs/gse102556_mdd_extension.json"
+      ]
+    },
+    {
+      "key": "gse290452_akap11_model_case_study",
+      "description": "AKAP11 heterozygous knockout untreated neuronal-model extension cohort",
+      "command": [
+        "Rscript",
+        "scripts/analyze_neural_bulk_cohort.R",
+        "paper/configs/gse290452_akap11_model_extension.json"
+      ]
+    }
+  ],
+  "ablations": [
+    {
+      "cohortKey": "gse68719_pd_primary",
+      "ablationName": "drop_covariates",
+      "patch": {
+        "contrastName": "PD_vs_control_simple_group",
+        "designFormula": "~ group",
+        "numericCovariates": [],
+        "resultPrefix": "ablation_gse68719_pd_vs_control_simple_group",
+        "figurePrefix": "ablation_gse68719_pd_primary",
+        "projectTitle": "Parkinson disease BA9 cortex simple-group ablation",
+        "notes": "Ablation run without explicit pmi/age/rin covariates."
+      }
+    },
+    {
+      "cohortKey": "gse102556_mdd_extension",
+      "ablationName": "drop_covariates",
+      "patch": {
+        "contrastName": "MDD_vs_control_dlPFC_simple_group",
+        "designFormula": "~ group",
+        "numericCovariates": [],
+        "resultPrefix": "ablation_gse102556_mdd_vs_control_dlpfc_simple_group",
+        "figurePrefix": "ablation_gse102556_mdd_extension",
+        "projectTitle": "MDD dlPFC simple-group ablation",
+        "notes": "Ablation run without explicit gender/age/pmi/ph/rin covariates."
+      }
+    }
+  ],
+  "cohorts": [
+    {
+      "key": "gse68719_pd_primary",
+      "enabled": true,
+      "jobKey": "gse68719_pd_case_study",
+      "datasetIdentifier": "GSE68719",
+      "diseaseArea": "parkinson_disease",
+      "role": "primary",
+      "sampleCount": 73,
+      "contrastName": "PD_vs_control",
+      "contrastDefinition": "Parkinson disease BA9 postmortem brain tissue versus neurologically normal control BA9 tissue",
+      "sampleGroupSource": "Parsed from GEO sample titles (`C_*` controls, `P_*` Parkinson disease) together with GEO sample characteristics.",
+      "batchHandlingRule": "DESeq2 design = ~ post_mortem_interval_pmi + age_at_death + rna_integrity_number_rin + group; no additional batch factor.",
+      "notes": "Primary neural manuscript cohort.",
+      "workbookPath": "results/gse68719_pd_vs_control_pathway_viewer_input.xlsx",
+      "reportPath": "paper/outputs/ymeth_pivot/reports/gse68719_pd_primary.report.html",
+      "degTablePath": "results/gse68719_pd_vs_control_deseq2.tsv",
+      "pathwayTablePath": "results/gse68719_pd_vs_control_fgsea_reactome.tsv",
+      "summaryTablePath": "results/gse68719_pd_vs_control_analysis_summary.tsv",
+      "sampleMetadataPath": "results/gse68719_pd_vs_control_sample_metadata.tsv",
+      "figurePaths": [
+        "figures/gse68719_pd_primary_pca.pdf",
+        "figures/gse68719_pd_primary_pca.png",
+        "figures/gse68719_pd_primary_volcano.pdf",
+        "figures/gse68719_pd_primary_volcano.png",
+        "figures/gse68719_pd_primary_pathway_dotplot.pdf",
+        "figures/gse68719_pd_primary_pathway_dotplot.png"
+      ]
+    },
+    {
+      "key": "gse159699_ad_replication",
+      "enabled": true,
+      "jobKey": "gse159699_ad_case_study",
+      "datasetIdentifier": "GSE159699",
+      "diseaseArea": "alzheimers_disease",
+      "role": "replication",
+      "sampleCount": 22,
+      "contrastName": "AD_vs_old_control",
+      "contrastDefinition": "Alzheimer disease lateral temporal lobe bulk RNA-seq versus age-matched old control tissue",
+      "sampleGroupSource": "Parsed from GEO sample titles (`*-Old` controls, `*-AD` Alzheimer disease); `Young` samples are excluded from the manuscript contrast.",
+      "batchHandlingRule": "DESeq2 design = ~ group; no explicit batch or age covariate is available for the AD samples in the series matrix.",
+      "notes": "Neural replication cohort.",
+      "workbookPath": "results/gse159699_ad_vs_old_control_pathway_viewer_input.xlsx",
+      "reportPath": "paper/outputs/ymeth_pivot/reports/gse159699_ad_replication.report.html",
+      "degTablePath": "results/gse159699_ad_vs_old_control_deseq2.tsv",
+      "pathwayTablePath": "results/gse159699_ad_vs_old_control_fgsea_reactome.tsv",
+      "summaryTablePath": "results/gse159699_ad_vs_old_control_analysis_summary.tsv",
+      "sampleMetadataPath": "results/gse159699_ad_vs_old_control_sample_metadata.tsv",
+      "figurePaths": [
+        "figures/gse159699_ad_replication_pca.pdf",
+        "figures/gse159699_ad_replication_pca.png",
+        "figures/gse159699_ad_replication_volcano.pdf",
+        "figures/gse159699_ad_replication_volcano.png",
+        "figures/gse159699_ad_replication_pathway_dotplot.pdf",
+        "figures/gse159699_ad_replication_pathway_dotplot.png"
+      ]
+    },
+    {
+      "key": "gse102556_mdd_extension",
+      "enabled": true,
+      "jobKey": "gse102556_mdd_case_study",
+      "datasetIdentifier": "GSE102556",
+      "diseaseArea": "major_depressive_disorder",
+      "role": "extension",
+      "sampleCount": 48,
+      "contrastName": "MDD_vs_control_dlPFC",
+      "contrastDefinition": "Human dorsolateral prefrontal cortex (BA8/9) bulk RNA-seq from major depressive disorder versus unaffected control donors",
+      "sampleGroupSource": "Human-only GPL11154 series matrix subset restricted to dlPFC samples; contrast labels parsed from `phenotype` in GEO sample characteristics.",
+      "batchHandlingRule": "DESeq2 design = ~ gender + age + pmi + ph + rin + group on the human dlPFC subset; medication and smoking fields omitted because of missingness.",
+      "notes": "Mental-health extension cohort activated from the human-only dlPFC subset.",
+      "workbookPath": "results/gse102556_mdd_vs_control_dlpfc_pathway_viewer_input.xlsx",
+      "reportPath": "paper/outputs/ymeth_pivot/reports/gse102556_mdd_extension.report.html",
+      "degTablePath": "results/gse102556_mdd_vs_control_dlpfc_deseq2.tsv",
+      "pathwayTablePath": "results/gse102556_mdd_vs_control_dlpfc_fgsea_reactome.tsv",
+      "summaryTablePath": "results/gse102556_mdd_vs_control_dlpfc_analysis_summary.tsv",
+      "sampleMetadataPath": "results/gse102556_mdd_vs_control_dlpfc_sample_metadata.tsv",
+      "figurePaths": [
+        "figures/gse102556_mdd_extension_pca.pdf",
+        "figures/gse102556_mdd_extension_pca.png",
+        "figures/gse102556_mdd_extension_volcano.pdf",
+        "figures/gse102556_mdd_extension_volcano.png",
+        "figures/gse102556_mdd_extension_pathway_dotplot.pdf",
+        "figures/gse102556_mdd_extension_pathway_dotplot.png"
+      ]
+    },
+    {
+      "key": "gse290452_akap11_model_extension",
+      "enabled": true,
+      "jobKey": "gse290452_akap11_model_case_study",
+      "datasetIdentifier": "GSE290452",
+      "diseaseArea": "bipolar_schizophrenia_risk_model",
+      "role": "orthogonal_extension",
+      "sampleCount": 6,
+      "contrastName": "AKAP11_HetKO_vs_WT_UNT",
+      "contrastDefinition": "Human iPSC-derived neuronal glial culture with heterozygous AKAP11 knockout versus wild-type control in the untreated state",
+      "sampleGroupSource": "Parsed from GEO sample characteristics (`genotype`, `treatment`) and aligned to submitter-supplied raw-count headers by sample title.",
+      "batchHandlingRule": "Restrict to untreated samples only, then fit DESeq2 with design = ~ group.",
+      "notes": "Orthogonal psychiatric-risk model extension cohort using submitter raw counts rather than NCBI-generated counts.",
+      "workbookPath": "results/gse290452_akap11_hetko_vs_wt_unt_pathway_viewer_input.xlsx",
+      "reportPath": "paper/outputs/ymeth_pivot/reports/gse290452_akap11_model_extension.report.html",
+      "degTablePath": "results/gse290452_akap11_hetko_vs_wt_unt_deseq2.tsv",
+      "pathwayTablePath": "results/gse290452_akap11_hetko_vs_wt_unt_fgsea_reactome.tsv",
+      "summaryTablePath": "results/gse290452_akap11_hetko_vs_wt_unt_analysis_summary.tsv",
+      "sampleMetadataPath": "results/gse290452_akap11_hetko_vs_wt_unt_sample_metadata.tsv",
+      "figurePaths": [
+        "figures/gse290452_akap11_model_extension_pca.pdf",
+        "figures/gse290452_akap11_model_extension_pca.png",
+        "figures/gse290452_akap11_model_extension_volcano.pdf",
+        "figures/gse290452_akap11_model_extension_volcano.png",
+        "figures/gse290452_akap11_model_extension_pathway_dotplot.pdf",
+        "figures/gse290452_akap11_model_extension_pathway_dotplot.png"
+      ]
+    }
+  ]
+}

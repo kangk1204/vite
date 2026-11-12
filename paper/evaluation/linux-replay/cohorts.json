@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "sourceSnapshot": "9bb30adcf4fee15fe3d91daec14334f540bc5bda5e6df2c82bccf4d58f54cb8a",
+  "sourceArchiveSha256": "d4d61b2a1f43a9dc9846822cd70a0443a949c743863852b3bfa5838d6972eeea",
+  "renvLockSha256": "abbdbb56fed4c5c8376af9f31ac509f48ce12b4b05b5c5b9b2675d69388bd9a1",
+  "baseImage": "bioconductor/bioconductor_docker:RELEASE_3_22-R-4.5.1@sha256:25e5beb01fe01975c815161f0a2484a4edc8f8585229c3bbc026f46bec10870c",
+  "platformDigests": {
+    "linux/arm64": "sha256:581625a96b00d2757a0ec621b0d40ec84ef971a3f69228d14817e792e493b728",
+    "linux/amd64": "sha256:e17d6771748f6f629bca48cf4702fe03bd8158d214de4c5366c2fad0d8c9adac"
+  },
+  "R": "4.5.1",
+  "Bioconductor": "3.22",
+  "node": "25.8.0",
+  "supplementalGzipReader": {"R.methodsS3": "1.8.2", "R.oo": "1.27.1", "R.utils": "2.13.0"},
+  "inputPreparationSources": {"scripts/prepare_airway_case.R": "726baa7174440536b0b76f75ac681b1388d8656c484751c0a98cc8d7c7f50872"},
+  "originalInputSha256": {
+    "gse68719_pd_primary": {"raw_counts":"7c06091f59c812df4c36a4e59b35fd7a0e24914da8ab8ce9eeb8398f8667aebd", "sample_metadata":"e43fef619f1969ef54fc20fbee6dd5dc8c6148f841bdb65ab545e4e045ae784a"},
+    "airway_paired_reference": {"raw_counts":"a7e2a01299f83dcfc3a19aed2fa1c42d7cac6051f7c2446c2dc7cfd872c51027", "sample_metadata":"82cc6796d03c31ecefa681e88f0f0d8fbb662ef41aeb576fd0eb0e54836c8e74"}
+  },
+  "cohorts": [
+    {"key":"gse68719_pd_primary","jobKey":"gse68719_pd_case_study","outputDir":"paper/outputs/publication_v2/gse68719_pd_primary","prefix":"gse68719_pd_vs_control","samples":73,"bootstrap":500,"numericCovariates":["post_mortem_interval_pmi","age_at_death","rna_integrity_number_rin"],"categoricalCovariates":[]},
+    {"key":"airway_paired_reference","jobKey":"airway_paired_reference","outputDir":"paper/outputs/publication_v2/airway_paired_reference/results","prefix":"airway_paired","samples":8,"bootstrap":0,"numericCovariates":[],"categoricalCovariates":["donor"]}
+  ]
+}

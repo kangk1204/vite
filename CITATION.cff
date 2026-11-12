@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "Please cite this version when using Pathway Network Viewer."
+title: "Pathway Network Viewer"
+type: software
+authors:
+  - family-names: "Kang"
+    given-names: "Keunsoo"
+    affiliation: "Department of Biomedical Sciences, Dankook University, Cheonan 31116, Republic of Korea"
+    email: "kangk1204@gmail.com"
+version: "publication-2026-11-12"
+date-released: 2026-11-12
+repository-code: "https://github.com/kangk1204/vite"
+url: "https://github.com/kangk1204/vite/releases/tag/publication-2026-11-12"
+license: MIT
+keywords:
+  - RNA sequencing
+  - gene set enrichment
+  - sensitivity analysis
+  - reproducibility

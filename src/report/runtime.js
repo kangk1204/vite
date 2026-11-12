@@ -1,6 +1,6 @@
 (function () {
   const data = window.__PNV_DATA__;
-  const { cytoscape, Plotly } = window;
+  const { cytoscape } = window;
   const STORAGE_KEY = 'pnv.viewer.preferences.v1';
   const LAYOUT_OPTIONS = new Set(['fcose', 'elk-stress', 'elk-force', 'elk-layered', 'cose', 'concentric', 'circle']);
   const PPI_OPTIONS = new Set(['all', 'string', 'huri', 'custom']);
@@ -17,10 +17,25 @@
   const SAVE_PREFERENCES_DEBOUNCE_MS = 120;
   const LABEL_COLLISION_DEBOUNCE_MS = 56;
   const LABEL_BUCKET_SIZE = 44;
+  const PATHWAY_SEARCH_CACHE_LIMIT = 28;
+  const PATHWAY_SEARCH_TOKEN_CACHE_LIMIT = 96;
+  const PATHWAY_SEARCH_CACHEABLE_MATCH_LIMIT = 1800;
+  const PATHWAY_SEARCH_PREFIX_TOKEN_LENGTH = 3;
+  const PATHWAY_SEARCH_MIN_PREFIX_TOKEN_LENGTH = 2;
+  const PATHWAY_SEARCH_PREFIX_INTERSECTION_LIMIT = 3;
+  const PATHWAY_LIST_RENDER_BATCH_SIZE = 180;
+  const PATHWAY_SEARCH_BASE_DEBOUNCE_MS = 36;
+  const PATHWAY_SEARCH_MAX_DEBOUNCE_MS = 112;
   const DEVICE_MEMORY_GB =
     typeof navigator !== 'undefined' && Number.isFinite(Number(navigator.deviceMemory))
       ? Number(navigator.deviceMemory)
       : 4;
+  const PATHWAY_LIST_INITIAL_VISIBLE =
+    DEVICE_MEMORY_GB <= 2 ? 140 : DEVICE_MEMORY_GB >= 8 ? 240 : 180;
+  const PATHWAY_LIST_INCREMENT =
+    DEVICE_MEMORY_GB <= 2 ? 100 : DEVICE_MEMORY_GB >= 8 ? 220 : 160;
+  const LABEL_COLLISION_NODE_HARD_LIMIT =
+    DEVICE_MEMORY_GB <= 2 ? 180 : DEVICE_MEMORY_GB >= 8 ? 420 : 300;
   const PREFERS_REDUCED_MOTION =
     typeof window !== 'undefined' &&
     typeof window.matchMedia === 'function' &&
@@ -53,7 +68,7 @@
     app.innerHTML = '<main style="padding:24px;font-family:Arial,sans-serif;color:#102039">Unable to load report data. Please regenerate report.html from the builder.</main>';
     return;
   }
-  if (typeof cytoscape !== 'function' || !Plotly) {
+  if (typeof cytoscape !== 'function') {
     app.innerHTML = '<main style="padding:24px;font-family:Arial,sans-serif;color:#102039">Required visualization runtime is unavailable. Please regenerate report.html and open it in a modern browser.</main>';
     return;
   }
@@ -62,6 +77,11 @@
   const conditionSummary = `${formatConditionLabel(data.project.conditionB)} versus ${formatConditionLabel(data.project.conditionA)}`;
   const hoverConditionALabel = escapeHtml(formatConditionLabel(data.project.conditionA));
   const hoverConditionBLabel = escapeHtml(formatConditionLabel(data.project.conditionB));
+  const provenance = data.provenance || {};
+  const evidence = data.evidence || {};
+  const fullEvidence = data.reportCondition !== 'basic';
+  const sourceTables = evidence.sourceTables || {};
+  let sourceTableOffset = 0;
 
   app.innerHTML = `
     <div class="report-shell">
@@ -74,6 +94,37 @@
           <h1>${escapeHtml(contrastDisplayTitle)}</h1>
           <p class="headline-subtitle">${escapeHtml(data.project.projectTitle)}</p>
           <p class="muted header-condition-line">${escapeHtml(conditionSummary)}</p>
+          <dl class="provenance-grid" aria-label="Analysis provenance" ${fullEvidence ? '' : 'hidden'}>
+            <div class="provenance-item">
+              <dt>Dataset</dt>
+              <dd>${escapeHtml(formatProvenanceValue(provenance.datasetIdentifier, 'Not recorded'))}</dd>
+            </div>
+            <div class="provenance-item">
+              <dt>Contrast</dt>
+              <dd>${escapeHtml(formatProvenanceValue(provenance.contrastDefinition, conditionSummary))}</dd>
+            </div>
+            <div class="provenance-item">
+              <dt>Sample groups</dt>
+              <dd>${escapeHtml(formatProvenanceValue(provenance.sampleGroupSource, 'Not recorded'))}</dd>
+            </div>
+            <div class="provenance-item">
+              <dt>Batch rule</dt>
+              <dd>${escapeHtml(formatProvenanceValue(provenance.batchHandlingRule, 'Not recorded'))}</dd>
+            </div>
+            <div class="provenance-item">
+              <dt>Git commit</dt>
+              <dd>${escapeHtml(formatProvenanceValue(provenance.gitCommit, 'Not recorded'))}</dd>
+            </div>
+            <div class="provenance-item">
+              <dt>Reference assets</dt>
+              <dd>${escapeHtml(formatProvenanceValue(provenance.referenceAssetVersion, 'Not recorded'))}</dd>
+            </div>
+          </dl>
+          ${
+            fullEvidence && provenance.notes
+              ? `<p class="provenance-notes muted">${escapeHtml(String(provenance.notes))}</p>`
+              : ''
+          }
           <div class="header-export">
             <div class="detail-head">
               <strong>Figure export</strong>
@@ -110,24 +161,26 @@
           </div>
         </div>
         <div class="header-badges">
-          <span class="legend-badge">Node size = −log10(FDR)</span>
+          <span class="legend-badge">Node size = −log10(FDR); missing FDR uses minimum size</span>
           <span class="legend-badge">Leading edge = blue · pathway member = light blue · outside = gray</span>
-          <span class="legend-badge">Edge width = confidence weight (STRING/HuRI/Custom)</span>
+          <span class="legend-badge">PPI edges are reference associations, not inferred causal effects</span>
           <span class="legend-badge">Interactive standalone HTML</span>
         </div>
       </header>
+      ${renderEvidenceHeader()}
       <div class="report-grid">
         <section class="panel network-panel" id="network-panel">
           <div class="network-toolbar">
             <div class="pathway-meta">
               <h2 id="current-pathway-name"></h2>
               <p id="current-pathway-summary"></p>
+              <div id="pathway-evidence" class="pathway-evidence" ${fullEvidence ? '' : 'hidden'}></div>
               <div class="focused-gene-chip" id="focused-gene-chip" hidden>Focused gene</div>
             </div>
             <div class="toolbar-controls">
               <label class="toggle-chip">
                 <input id="toggle-all-genes" type="checkbox" />
-                Show all pathway genes
+                <span id="toggle-all-genes-label">Show all pathway genes</span>
               </label>
               <select id="layout-mode" class="select-control">
                 <option value="fcose">Layout: fCoSE</option>
@@ -186,14 +239,14 @@
         <aside class="sidebar">
           <section class="panel plot-panel">
             <div class="sidebar-head">
-              <strong>GSEA enrichment</strong>
+              <strong>Ranked-gene running sum</strong>
               <span class="muted" id="plot-caption"></span>
             </div>
             <div id="plot-container"></div>
           </section>
           <section class="panel list-panel">
             <div class="sidebar-head">
-              <strong>Enriched pathways</strong>
+              <strong>Tested pathways</strong>
               <span class="muted" id="pathway-count" aria-live="polite"></span>
             </div>
             <div style="margin: 12px 0">
@@ -203,6 +256,10 @@
               </div>
             </div>
             <div class="pathway-list" id="pathway-list" role="listbox" aria-label="Enriched pathway list"></div>
+            <div class="pathway-list-footer" id="pathway-list-footer" hidden>
+              <span class="muted pathway-list-progress" id="pathway-list-progress"></span>
+              <button id="pathway-list-more" class="tool-button pathway-list-more" type="button">Load more</button>
+            </div>
           </section>
         </aside>
         <section class="panel detail-panel table-panel">
@@ -233,6 +290,9 @@
   const pathwaySearchEl = document.getElementById('pathway-search');
   const pathwaySearchClearEl = document.getElementById('pathway-search-clear');
   const pathwayListEl = document.getElementById('pathway-list');
+  const pathwayListFooterEl = document.getElementById('pathway-list-footer');
+  const pathwayListProgressEl = document.getElementById('pathway-list-progress');
+  const pathwayListMoreButtonEl = document.getElementById('pathway-list-more');
   const pathwayCountEl = document.getElementById('pathway-count');
   const currentPathwayNameEl = document.getElementById('current-pathway-name');
   const currentPathwaySummaryEl = document.getElementById('current-pathway-summary');
@@ -259,18 +319,23 @@
   const exportDpiEl = document.getElementById('export-dpi');
   const exportButtonEl = document.getElementById('export-button');
 
+  installEvidenceControls();
+
   const significantPathways = data.pathways.filter(
     (pathway) => Number.isFinite(pathway.padj) && pathway.padj <= data.significantPadjThreshold,
   );
-  const allPathways = data.pathways.slice();
-  const defaultPathways = significantPathways.length ? significantPathways : allPathways;
+  const allPathways = data.pathways.map(pathway => ({ ...pathway, nodes: pathway.nodes.map(node => ({ ...node, sampleValues: Object.keys(node.sampleValues || {}).length ? node.sampleValues : data.sampleValuesByGene?.[node.id] || {} })) }));
+  const enrichmentCache = new Map();
+  const defaultPathways = allPathways;
   const pathwaySearchIndex = allPathways.map((pathway) => ({
     pathway,
-    nameLower: pathway.pathwayName.toLowerCase(),
+    nameNormalized: pathway.searchNameNormalized || normalizeMatchToken(pathway.pathwayName),
   }));
+  const pathwaySearchEngine = createPathwaySearchEngine(pathwaySearchIndex);
   const pathwayByKey = new Map(allPathways.map((pathway) => [pathway.key, pathway]));
   const tableSortCache = new Map();
   const pathwayNodeLookupCache = new Map();
+  const pathwayRenderPrepCache = new Map();
   const pathwayGeneSetCache = new Map();
   const geneDetailSampleRowsCache = new Map();
   const networkViewCache = new Map();
@@ -281,11 +346,20 @@
     DEVICE_MEMORY_GB <= 2 ? 150 : DEVICE_MEMORY_GB >= 8 ? 320 : 260;
   const MAX_GENE_DETAIL_SAMPLE_CACHE_ENTRIES =
     DEVICE_MEMORY_GB <= 2 ? 140 : DEVICE_MEMORY_GB >= 8 ? 420 : 280;
+  const MAX_PATHWAY_NODE_LOOKUP_CACHE_ENTRIES =
+    DEVICE_MEMORY_GB <= 2 ? 120 : DEVICE_MEMORY_GB >= 8 ? 380 : 250;
+  const MAX_PATHWAY_RENDER_PREP_CACHE_ENTRIES =
+    DEVICE_MEMORY_GB <= 2 ? 100 : DEVICE_MEMORY_GB >= 8 ? 300 : 200;
+  const MAX_PATHWAY_GENE_SET_CACHE_ENTRIES =
+    DEVICE_MEMORY_GB <= 2 ? 130 : DEVICE_MEMORY_GB >= 8 ? 400 : 270;
   let filteredPathwaysCache = null;
   let filteredPathwaysCacheSearch = null;
   let highlightedGeneSet = new Set();
   let renderPathwayTimerId = null;
   let pathwaySearchTimerId = null;
+  let pathwayListRenderFrameId = null;
+  let pathwayListRenderToken = 0;
+  let pathwayListVisibleCount = PATHWAY_LIST_INITIAL_VISIBLE;
   let labelCollisionFrameId = null;
   let labelCollisionTimerId = null;
   let savePreferencesTimerId = null;
@@ -294,8 +368,10 @@
   let lastRenderedNodeSignature = '';
   let lastLabelLayoutSignature = '';
   let lastPlottedPathwayKey = null;
-  let lastRenderedPathwayListSignature = '';
+  let lastRenderedPathwayListSearch = null;
+  let lastRenderedPathwayListRef = null;
   let lastRenderedPathwayListActiveKey = null;
+  let lastRenderedPathwayListVisibleCount = -1;
   let lastRenderedGeneTableSignature = '';
   let lastRenderedGeneTableActiveGeneId = null;
   let lastRenderedGeneTableHighlightedSignature = '';
@@ -477,7 +553,7 @@
   });
 
   pathwaySearchEl.addEventListener('input', (event) => {
-    const nextSearch = event.target.value.trim().toLowerCase();
+    const nextSearch = normalizeMatchToken(event.target.value);
     schedulePathwaySearchUpdate(nextSearch);
   });
   pathwaySearchEl.addEventListener('keydown', (event) => {
@@ -492,6 +568,25 @@
     pathwaySearchEl.value = '';
     schedulePathwaySearchUpdate('');
     pathwaySearchEl.focus();
+  });
+  pathwayListMoreButtonEl.addEventListener('click', () => {
+    const pathways = getFilteredPathways();
+    if (!pathways.length) {
+      return;
+    }
+    if (!expandPathwayListVisibleCount(pathways.length)) {
+      return;
+    }
+    const activePathwayKey = state.currentPathwayKey;
+    renderPathwayList();
+    if (activePathwayKey) {
+      const nextButton = pathwayListEl.querySelector(
+        `[data-pathway-key="${escapeCss(activePathwayKey)}"]`,
+      );
+      if (nextButton instanceof HTMLElement) {
+        nextButton.focus();
+      }
+    }
   });
   pathwayListEl.addEventListener('click', (event) => {
     const target = event.target instanceof Element ? event.target : null;
@@ -542,6 +637,7 @@
     if (!nextPathwayKey) {
       return;
     }
+    ensurePathwayListIncludesIndex(targetIndex, pathways.length);
     selectPathway(nextPathwayKey);
     const nextButton = pathwayListEl.querySelector(`[data-pathway-key="${escapeCss(nextPathwayKey)}"]`);
     if (nextButton instanceof HTMLElement) {
@@ -721,6 +817,7 @@
     heatmapButtonEl.setAttribute('aria-busy', 'true');
     heatmapButtonEl.innerHTML = '<span>Preparing...</span>';
     try {
+      await ensurePlotlyRuntimeLoaded();
       await openHeatmapFigureWindow(pathway);
     } catch (error) {
       console.error(error);
@@ -745,6 +842,7 @@
     if (pathwaySearchTimerId !== null) {
       window.clearTimeout(pathwaySearchTimerId);
     }
+    const delayMs = getPathwaySearchDebounceMs(nextSearch);
     pathwaySearchTimerId = window.setTimeout(() => {
       if (nextSearch === state.search) {
         pathwaySearchClearEl.hidden = !state.search;
@@ -759,7 +857,21 @@
         renderCurrentPathway();
       }
       pathwaySearchTimerId = null;
-    }, 70);
+    }, delayMs);
+  }
+
+  function getPathwaySearchDebounceMs(query) {
+    const normalizedQuery = String(query || '');
+    if (!normalizedQuery) {
+      return PATHWAY_SEARCH_BASE_DEBOUNCE_MS;
+    }
+    const corpusScale = Math.min(1.85, Math.max(1, allPathways.length / 1700));
+    const queryLengthFactor = normalizedQuery.length >= 10 ? 0.72 : normalizedQuery.length >= 6 ? 0.86 : 1;
+    const memoryFactor = DEVICE_MEMORY_GB <= 2 ? 1.32 : DEVICE_MEMORY_GB >= 8 ? 0.82 : 1;
+    const estimated = Math.round(
+      PATHWAY_SEARCH_BASE_DEBOUNCE_MS * corpusScale * queryLengthFactor * memoryFactor,
+    );
+    return clamp(estimated, PATHWAY_SEARCH_BASE_DEBOUNCE_MS, PATHWAY_SEARCH_MAX_DEBOUNCE_MS);
   }
 
   function getFilteredPathways() {
@@ -769,9 +881,7 @@
 
     const pathways = !state.search
       ? defaultPathways
-      : pathwaySearchIndex
-          .filter((entry) => entry.nameLower.includes(state.search))
-          .map((entry) => entry.pathway);
+      : pathwaySearchEngine.filter(state.search);
     filteredPathwaysCacheSearch = state.search;
     filteredPathwaysCache = pathways;
     return pathways;
@@ -783,7 +893,12 @@
       return cached;
     }
     const pathwayGeneSet = new Set(pathway.allGenes);
-    pathwayGeneSetCache.set(pathway.key, pathwayGeneSet);
+    setBoundedMapEntry(
+      pathwayGeneSetCache,
+      pathway.key,
+      pathwayGeneSet,
+      MAX_PATHWAY_GENE_SET_CACHE_ENTRIES,
+    );
     return pathwayGeneSet;
   }
 
@@ -792,12 +907,37 @@
     filteredPathwaysCache = null;
   }
 
+  function withEnrichmentPoints(pathway) {
+    if (!pathway) return pathway;
+    if (enrichmentCache.has(pathway.key)) return enrichmentCache.get(pathway.key);
+    const edges = pathway.edgeIndices ? pathway.edgeIndices.map(index => data.sharedEdges[index]) : pathway.edges;
+    if (pathway.enrichment?.representation !== 'ranked-hits-v1') return { ...pathway, edges };
+    const ranking = data.rankedGenes || [];
+    const hits = new Set(pathway.enrichment.hitIndices);
+    const total = [...hits].reduce((sum, index) => sum + Math.abs(ranking[index - 1]?.metric || 0), 0);
+    const points = [];
+    if (!pathway.enrichment.unavailableReason && hits.size > 0 && hits.size < ranking.length) {
+      const miss = ranking.length === hits.size ? 0 : 1 / (ranking.length - hits.size);
+      let running = 0;
+      points.push({ index: 0, value: 0 });
+      ranking.forEach((entry, index) => {
+        const isHit = hits.has(index + 1);
+        running += isHit ? (total ? Math.abs(entry.metric) / total : 1 / hits.size) : -miss;
+        points.push({ index: index + 1, value: running, gene: entry.gene, isHit });
+      });
+    }
+    const hydrated = { ...pathway, edges, enrichment: { ...pathway.enrichment, points } };
+    if (enrichmentCache.size >= 3) enrichmentCache.delete(enrichmentCache.keys().next().value);
+    enrichmentCache.set(pathway.key, hydrated);
+    return hydrated;
+  }
+
   function getCurrentPathway() {
     if (state.currentPathwayKey && pathwayByKey.has(state.currentPathwayKey)) {
-      return pathwayByKey.get(state.currentPathwayKey);
+      return withEnrichmentPoints(pathwayByKey.get(state.currentPathwayKey));
     }
     const filteredPathways = getFilteredPathways();
-    return filteredPathways[0] || defaultPathways[0] || allPathways[0] || null;
+    return withEnrichmentPoints(filteredPathways[0] || defaultPathways[0] || allPathways[0] || null);
   }
 
   function getVisibleGeneIds(pathway) {
@@ -844,7 +984,12 @@
 
     const nodeById = new Map(pathway.nodes.map((node) => [node.id, node]));
     const lookup = { nodeById };
-    pathwayNodeLookupCache.set(pathway.key, lookup);
+    setBoundedMapEntry(
+      pathwayNodeLookupCache,
+      pathway.key,
+      lookup,
+      MAX_PATHWAY_NODE_LOOKUP_CACHE_ENTRIES,
+    );
     return lookup;
   }
 
@@ -915,33 +1060,24 @@
       return cached;
     }
 
-    const baseVisibleGeneIds = getVisibleGeneIds(pathway);
-    const baseNodes = pathway.nodes.filter((node) => baseVisibleGeneIds.has(node.id));
+    const renderPrep = getPathwayRenderPrep(pathway);
+    const baseNodes =
+      state.showAllGenes && !pathway.fallbackToLeadingEdge ? renderPrep.allNodes : renderPrep.leadingNodes;
     const visibleNodes =
       !state.topGeneCount || baseNodes.length <= state.topGeneCount
         ? baseNodes
-        : [...baseNodes]
-            .sort(
-              (left, right) =>
-                right.sizeMetric - left.sizeMetric ||
-                right.labelPriority - left.labelPriority ||
-                left.label.localeCompare(right.label),
-            )
-            .slice(0, state.topGeneCount);
+        : baseNodes === renderPrep.allNodes
+          ? renderPrep.allNodesSortedBySize.slice(0, state.topGeneCount)
+          : renderPrep.leadingNodesSortedBySize.slice(0, state.topGeneCount);
     const visibleGeneIds = new Set(visibleNodes.map((node) => node.id));
-    let visibleEdges = pathway.edges.filter(
-      (edge) => visibleGeneIds.has(edge.source) && visibleGeneIds.has(edge.target),
+    const baseEdges = renderPrep.edgesByMode[state.ppiMode] || renderPrep.edgesByMode.all;
+    let visibleEdges = baseEdges.filter(
+      (edge) =>
+        visibleGeneIds.has(edge.source) &&
+        visibleGeneIds.has(edge.target) &&
+        Number(edge.score) >= state.edgeScoreMin,
     );
-    if (state.ppiMode === 'string') {
-      visibleEdges = visibleEdges.filter((edge) => edge.isString);
-    } else if (state.ppiMode === 'huri') {
-      visibleEdges = visibleEdges.filter((edge) => edge.isHuRI);
-    } else if (state.ppiMode === 'custom') {
-      visibleEdges = visibleEdges.filter((edge) => edge.isCustom);
-    }
-    visibleEdges = visibleEdges.filter((edge) => Number(edge.score) >= state.edgeScoreMin);
     if (state.topEdgePercentile < 100 && visibleEdges.length > 1) {
-      visibleEdges.sort((left, right) => right.score - left.score);
       const keepCount = Math.max(1, Math.ceil(visibleEdges.length * (state.topEdgePercentile / 100)));
       visibleEdges = visibleEdges.slice(0, keepCount);
     }
@@ -970,6 +1106,50 @@
     };
     setNetworkViewCacheEntry(cacheKey, renderData);
     return renderData;
+  }
+
+  function sortNodesByVisualPriority(nodes) {
+    return [...nodes].sort(
+      (left, right) =>
+        right.sizeMetric - left.sizeMetric ||
+        right.labelPriority - left.labelPriority ||
+        left.label.localeCompare(right.label),
+    );
+  }
+
+  function sortEdgesByScore(edges) {
+    return [...edges].sort((left, right) => Number(right.score) - Number(left.score));
+  }
+
+  function getPathwayRenderPrep(pathway) {
+    const cached = getLruMapEntry(pathwayRenderPrepCache, pathway.key);
+    if (cached) {
+      return cached;
+    }
+
+    const leadingGeneIds = new Set(pathway.leadingEdgeGenes.length ? pathway.leadingEdgeGenes : pathway.allGenes);
+    const allNodes = pathway.nodes;
+    const leadingNodes = allNodes.filter((node) => leadingGeneIds.has(node.id));
+    const allEdgesSorted = sortEdgesByScore(pathway.edges);
+    const prep = {
+      allNodes,
+      leadingNodes: leadingNodes.length ? leadingNodes : allNodes,
+      allNodesSortedBySize: sortNodesByVisualPriority(allNodes),
+      leadingNodesSortedBySize: sortNodesByVisualPriority(leadingNodes.length ? leadingNodes : allNodes),
+      edgesByMode: {
+        all: allEdgesSorted,
+        string: allEdgesSorted.filter((edge) => edge.isString),
+        huri: allEdgesSorted.filter((edge) => edge.isHuRI),
+        custom: allEdgesSorted.filter((edge) => edge.isCustom),
+      },
+    };
+    setBoundedMapEntry(
+      pathwayRenderPrepCache,
+      pathway.key,
+      prep,
+      MAX_PATHWAY_RENDER_PREP_CACHE_ENTRIES,
+    );
+    return prep;
   }
 
   function createLayoutOptions(nodeCount) {
@@ -1068,9 +1248,22 @@
   function renderPathwayList() {
     const previousPathwayKey = state.currentPathwayKey;
     const pathways = getFilteredPathways();
+    const shouldResetVisibleWindow =
+      lastRenderedPathwayListSearch !== state.search || lastRenderedPathwayListRef !== pathways;
+    if (shouldResetVisibleWindow) {
+      const searchBoost = state.search ? Math.floor(PATHWAY_LIST_INCREMENT * 0.6) : 0;
+      pathwayListVisibleCount = Math.min(
+        pathways.length,
+        PATHWAY_LIST_INITIAL_VISIBLE + searchBoost,
+      );
+    }
     const hasCurrent = pathways.some((pathway) => pathway.key === state.currentPathwayKey);
     if (pathways.length && !hasCurrent) {
       state.currentPathwayKey = pathways[0]?.key || defaultPathways[0]?.key || allPathways[0]?.key || null;
+    }
+    const currentPathwayIndex = pathways.findIndex((pathway) => pathway.key === state.currentPathwayKey);
+    if (currentPathwayIndex >= 0) {
+      ensurePathwayListIncludesIndex(currentPathwayIndex, pathways.length);
     }
     pathwayCountEl.textContent = state.search
       ? `${pathways.length} matches / ${allPathways.length} total`
@@ -1079,42 +1272,84 @@
         : `${pathways.length} significant shown / ${allPathways.length} total`;
     if (!pathways.length) {
       state.currentPathwayKey = null;
-      const emptySignature = `${state.search}::empty`;
-      if (lastRenderedPathwayListSignature !== emptySignature) {
+      const shouldRebuildEmptyState =
+        lastRenderedPathwayListSearch !== state.search || lastRenderedPathwayListRef !== pathways;
+      if (shouldRebuildEmptyState) {
         pathwayListEl.innerHTML = '<p class="pathway-list-empty">No pathways match this search.</p>';
-        lastRenderedPathwayListSignature = emptySignature;
+        lastRenderedPathwayListSearch = state.search;
+        lastRenderedPathwayListRef = pathways;
       }
       lastRenderedPathwayListActiveKey = null;
+      lastRenderedPathwayListVisibleCount = 0;
+      pathwayListFooterEl.hidden = true;
       return previousPathwayKey !== state.currentPathwayKey;
     }
 
-    const nextSignature = `${state.search}::${pathways.map((pathway) => pathway.key).join('|')}`;
-    const shouldRebuildList = nextSignature !== lastRenderedPathwayListSignature;
+    const visiblePathways = pathways.slice(0, pathwayListVisibleCount);
+    const shouldRebuildList =
+      lastRenderedPathwayListSearch !== state.search ||
+      lastRenderedPathwayListRef !== pathways ||
+      lastRenderedPathwayListVisibleCount !== pathwayListVisibleCount;
     if (shouldRebuildList) {
-      pathwayListEl.innerHTML = pathways
-        .map((pathway) => {
-          const isActive = pathway.key === state.currentPathwayKey;
-          return `
-            <button
-              class="pathway-button ${isActive ? 'active' : ''}"
-              data-pathway-key="${escapeHtml(pathway.key)}"
-              role="option"
-              aria-current="${isActive ? 'true' : 'false'}"
-              aria-selected="${isActive ? 'true' : 'false'}"
-              tabindex="${isActive ? '0' : '-1'}"
-            >
-              <strong>${escapeHtml(pathway.pathwayName)}</strong><br />
-              <small>${escapeHtml(pathway.collection)} · NES ${formatNumber(pathway.nes)} · FDR ${formatSci(pathway.padj)}</small>
-            </button>
-          `;
-        })
-        .join('');
-      lastRenderedPathwayListSignature = nextSignature;
+      rebuildPathwayListButtons(visiblePathways);
+      lastRenderedPathwayListSearch = state.search;
+      lastRenderedPathwayListRef = pathways;
       lastRenderedPathwayListActiveKey = state.currentPathwayKey;
+      lastRenderedPathwayListVisibleCount = pathwayListVisibleCount;
     } else if (lastRenderedPathwayListActiveKey !== state.currentPathwayKey) {
       syncPathwayListActiveState();
     }
+    updatePathwayListFooter(pathways.length);
     return previousPathwayKey !== state.currentPathwayKey;
+  }
+
+  function expandPathwayListVisibleCount(totalCount) {
+    const normalizedTotalCount = Math.max(0, Number(totalCount) || 0);
+    if (pathwayListVisibleCount >= normalizedTotalCount) {
+      return false;
+    }
+    pathwayListVisibleCount = Math.min(
+      normalizedTotalCount,
+      pathwayListVisibleCount + PATHWAY_LIST_INCREMENT,
+    );
+    return true;
+  }
+
+  function ensurePathwayListIncludesIndex(targetIndex, totalCount) {
+    if (!Number.isFinite(targetIndex) || targetIndex < 0) {
+      return;
+    }
+    const normalizedTotalCount = Math.max(0, Number(totalCount) || 0);
+    if (!normalizedTotalCount) {
+      return;
+    }
+    while (targetIndex >= pathwayListVisibleCount && pathwayListVisibleCount < normalizedTotalCount) {
+      if (!expandPathwayListVisibleCount(normalizedTotalCount)) {
+        break;
+      }
+    }
+  }
+
+  function updatePathwayListFooter(totalCount) {
+    const normalizedTotalCount = Math.max(0, Number(totalCount) || 0);
+    const visibleCount = Math.min(pathwayListVisibleCount, normalizedTotalCount);
+    const hasMore = visibleCount < normalizedTotalCount;
+    pathwayListFooterEl.hidden = !normalizedTotalCount;
+    if (!normalizedTotalCount) {
+      pathwayListProgressEl.textContent = '';
+      pathwayListMoreButtonEl.hidden = true;
+      return;
+    }
+    pathwayListProgressEl.textContent = `${visibleCount} / ${normalizedTotalCount} rendered`;
+    pathwayListMoreButtonEl.hidden = !hasMore;
+    if (hasMore) {
+      const nextCount = Math.min(PATHWAY_LIST_INCREMENT, normalizedTotalCount - visibleCount);
+      pathwayListMoreButtonEl.textContent = `Load ${nextCount} more`;
+      pathwayListMoreButtonEl.setAttribute('aria-label', `Load ${nextCount} more pathways`);
+    } else {
+      pathwayListMoreButtonEl.textContent = 'All pathways loaded';
+      pathwayListMoreButtonEl.setAttribute('aria-label', 'All pathways loaded');
+    }
   }
 
   function syncPathwayListActiveState() {
@@ -1133,6 +1368,61 @@
     lastRenderedPathwayListActiveKey = state.currentPathwayKey;
   }
 
+  function createPathwayButton(pathway, isActive) {
+    const button = document.createElement('button');
+    button.className = `pathway-button ${isActive ? 'active' : ''}`;
+    button.setAttribute('data-pathway-key', pathway.key);
+    button.setAttribute('role', 'option');
+    button.setAttribute('aria-current', isActive ? 'true' : 'false');
+    button.setAttribute('aria-selected', isActive ? 'true' : 'false');
+    button.tabIndex = isActive ? 0 : -1;
+
+    const title = document.createElement('strong');
+    title.textContent = pathway.pathwayName;
+    button.appendChild(title);
+    button.appendChild(document.createElement('br'));
+
+    const summary = document.createElement('small');
+    summary.textContent =
+      `${pathway.collection} · NES ${formatNumber(pathway.nes)} · FDR ${formatSci(pathway.padj)}`;
+    button.appendChild(summary);
+
+    return button;
+  }
+
+  function rebuildPathwayListButtons(pathways) {
+    pathwayListEl.innerHTML = '';
+    if (pathwayListRenderFrameId !== null) {
+      window.cancelAnimationFrame(pathwayListRenderFrameId);
+      pathwayListRenderFrameId = null;
+    }
+    pathwayListRenderToken += 1;
+    const renderToken = pathwayListRenderToken;
+
+    const appendRange = (startIndex) => {
+      if (renderToken !== pathwayListRenderToken) {
+        return;
+      }
+      const fragment = document.createDocumentFragment();
+      const endIndex = Math.min(startIndex + PATHWAY_LIST_RENDER_BATCH_SIZE, pathways.length);
+      for (let index = startIndex; index < endIndex; index += 1) {
+        const pathway = pathways[index];
+        if (!pathway) {
+          continue;
+        }
+        fragment.appendChild(createPathwayButton(pathway, pathway.key === state.currentPathwayKey));
+      }
+      pathwayListEl.appendChild(fragment);
+      if (endIndex < pathways.length) {
+        pathwayListRenderFrameId = window.requestAnimationFrame(() => appendRange(endIndex));
+      } else {
+        pathwayListRenderFrameId = null;
+      }
+    };
+
+    appendRange(0);
+  }
+
   function selectPathway(pathwayKey) {
     if (!pathwayKey || pathwayKey === state.currentPathwayKey) {
       return;
@@ -1146,6 +1436,7 @@
   function renderCurrentPathway() {
     const pathway = getCurrentPathway();
     if (!pathway) {
+      document.getElementById('pathway-evidence').textContent = '';
       lastRenderedPathwayKey = null;
       lastRenderedLayoutMode = null;
       lastRenderedNodeSignature = '';
@@ -1160,15 +1451,12 @@
         : 'No pathway available';
       currentPathwaySummaryEl.textContent = state.search
         ? 'Try a broader search term to restore pathway results.'
-        : 'This report has no enriched pathways to display.';
+        : 'No pathways were tested or supplied. No significance was inferred.';
       plotCaptionEl.textContent = 'No enrichment plot to render';
       toggleAllGenesEl.checked = false;
       toggleAllGenesEl.disabled = true;
       exportButtonEl.disabled = true;
       cy.elements().remove();
-      if (typeof Plotly?.purge === 'function') {
-        Plotly.purge('plot-container');
-      }
       const plotContainer = document.getElementById('plot-container');
       if (plotContainer) {
         plotContainer.innerHTML = '';
@@ -1194,9 +1482,12 @@
     const { visibleNodes, visibleGeneIds, visibleEdges, visibleNodeSignature, labelIds } = renderData;
     setHighlightedGenes(state.highlightedGeneIds.filter((geneId) => visibleGeneIds.has(geneId)));
 
+    renderPathwayEvidence(pathway);
     currentPathwayNameEl.textContent = pathway.pathwayName;
     currentPathwaySummaryEl.textContent = `${pathway.collection} · NES ${formatNumber(pathway.nes)} · FDR ${formatSci(pathway.padj)} · ${visibleNodes.length}/${pathway.allGenes.length} genes · ${visibleEdges.length} edges`;
-    plotCaptionEl.textContent = pathway.fallbackToLeadingEdge ? 'Leading-edge fallback mode' : 'Reference membership enabled';
+    const exactMembership = pathway.enrichment?.validation === 'matches_recorded_es' || Boolean((evidence.pathways?.[pathway.pathwayId]?.testedGenes || evidence.pathways?.[pathway.key]?.testedGenes));
+    document.getElementById('toggle-all-genes-label').textContent = exactMembership ? 'Show all tested pathway genes' : 'Show supplied/reference pathway genes';
+    plotCaptionEl.textContent = exactMembership ? (pathway.enrichment.validation === 'matches_recorded_es' ? 'Exact tested membership; ES matches recorded R result' : 'Exact tested membership; original ES unavailable') : 'Reconstructed view; original tested membership was not supplied';
     const canReusePositions =
       pathway.key === lastRenderedPathwayKey &&
       state.layoutMode === lastRenderedLayoutMode &&
@@ -1277,64 +1568,17 @@
   }
 
   function renderPlot(pathway) {
-    const xValues = pathway.enrichment.points.map((point) => point.index);
-    const yValues = pathway.enrichment.points.map((point) => point.value);
-    const geneByRank = new Map(
-      pathway.enrichment.points.map((point) => [Number(point.index), point.gene || 'N/A']),
-    );
-    const lineGenes = xValues.map((rank) => geneByRank.get(Number(rank)) || 'N/A');
-    const rugY = new Array(pathway.enrichment.hitIndices.length).fill(-pathway.enrichment.maxAbsValue * 1.08 || -0.08);
-    const hitGenes = pathway.enrichment.hitIndices.map((rank) => geneByRank.get(Number(rank)) || 'N/A');
-
-    Plotly.react(
-      'plot-container',
-      [
-        {
-          x: xValues,
-          y: yValues,
-          customdata: lineGenes,
-          type: 'scatter',
-          mode: 'lines',
-          line: {
-            color: '#2f78ff',
-            width: 3,
-            shape: 'spline',
-            smoothing: 1.05,
-          },
-          hovertemplate: 'Rank %{x}<br>Gene %{customdata}<br>ES %{y:.3f}<extra></extra>',
-        },
-        {
-          x: pathway.enrichment.hitIndices,
-          y: rugY,
-          customdata: hitGenes,
-          type: 'scatter',
-          mode: 'markers',
-          marker: {
-            color: '#102039',
-            size: 6,
-            symbol: 'line-ns-open',
-          },
-          hovertemplate: 'Hit rank %{x}<br>Gene %{customdata}<extra></extra>',
-        },
-      ],
-      {
-        margin: { l: 48, r: 20, t: 12, b: 36 },
-        paper_bgcolor: 'rgba(0,0,0,0)',
-        plot_bgcolor: 'rgba(248, 251, 255, 0.78)',
-        xaxis: {
-          title: 'Rank in ordered gene list',
-          gridcolor: 'rgba(122, 151, 201, 0.12)',
-          zeroline: false,
-        },
-        yaxis: {
-          title: 'Running enrichment score',
-          gridcolor: 'rgba(122, 151, 201, 0.12)',
-          zerolinecolor: 'rgba(16, 32, 57, 0.35)',
-        },
-        showlegend: false,
-      },
-      { displayModeBar: false, responsive: true },
-    );
+    const plotContainer = document.getElementById('plot-container');
+    if (!plotContainer) {
+      return;
+    }
+    const width = Math.max(260, Math.round(plotContainer.clientWidth || 680));
+    const height = Math.max(300, Math.round(plotContainer.clientHeight || 340));
+    plotContainer.innerHTML = buildEnrichmentPlotSvg(pathway, {
+      width,
+      height,
+      showFrame: false,
+    });
   }
 
   function renderGeneDetail(pathway, geneId) {
@@ -1369,6 +1613,7 @@
     geneDetailEl.className = '';
     geneDetailEl.innerHTML = `
       <strong>${escapeHtml(gene.label)}</strong>
+      ${fullEvidence ? geneEvidenceMarkup(gene) : ''}
       <div class="detail-grid">
         <div class="detail-card">
           <small>log2FC</small>
@@ -1398,7 +1643,7 @@
         </div>
         <div class="mini-row">
           <span>Visible network</span>
-          <strong>${state.showAllGenes && !pathway.fallbackToLeadingEdge ? 'All genes' : 'Leading edge'}</strong>
+          <strong>${state.showAllGenes && !pathway.fallbackToLeadingEdge ? ((evidence.pathways?.[pathway.pathwayId]?.testedGenes || evidence.pathways?.[pathway.key]?.testedGenes) ? 'All tested pathway genes' : 'Supplied/reference genes') : 'Leading edge'}</strong>
         </div>
       </div>
       ${
@@ -1603,7 +1848,10 @@
       } else if (key === 'isLeadingEdge') {
         result = Number(left.isLeadingEdge) - Number(right.isLeadingEdge);
       } else {
-        result = Number(left[key]) - Number(right[key]);
+        const leftValue = nullableNumber(left[key]), rightValue = nullableNumber(right[key]);
+        if (leftValue === null || rightValue === null) {
+          if (leftValue !== rightValue) return leftValue === null ? 1 : -1;
+        } else result = leftValue - rightValue;
       }
 
       if (result === 0) {
@@ -1916,6 +2164,26 @@
         );
       });
 
+    if (nodes.length > LABEL_COLLISION_NODE_HARD_LIMIT) {
+      cy.batch(() => {
+        nodes.forEach((node) => {
+          const isSelected = node.id() === state.selectedGeneId;
+          const isHighlighted = isHighlightedGene(node.id());
+          const isLeadingEdge = Boolean(node.data('isLeadingEdge'));
+          const preferredLabel =
+            isSelected || isHighlighted
+              ? node.data('label') || node.data('preferredLabel')
+              : node.data('preferredLabel');
+          if (isSelected || isHighlighted || isLeadingEdge) {
+            setNodeDisplayLabel(node, preferredLabel || '');
+            return;
+          }
+          setNodeDisplayLabel(node, '');
+        });
+      });
+      return;
+    }
+
     nodes.forEach((node) => {
       const isHighlighted = isHighlightedGene(node.id());
       const isLeadingEdge = Boolean(node.data('isLeadingEdge'));
@@ -2044,7 +2312,7 @@
         } else {
           sampleGroupCache.set(
             sampleKey,
-            inferSampleGroupFromName(sampleKey, data.project.conditionA, data.project.conditionB),
+            data.schemaVersion === 2 ? { key: 'U', label: 'Unassigned' } : inferSampleGroupFromName(sampleKey, data.project.conditionA, data.project.conditionB),
           );
         }
       }
@@ -2118,10 +2386,332 @@
     };
   }
 
+  function tokenizeMatchQuery(value) {
+    if (!value) {
+      return [];
+    }
+    const tokens = [];
+    const seen = new Set();
+    const length = value.length;
+    let cursor = 0;
+    while (cursor < length) {
+      while (cursor < length && value[cursor] === ' ') {
+        cursor += 1;
+      }
+      if (cursor >= length) {
+        break;
+      }
+      const start = cursor;
+      while (cursor < length && value[cursor] !== ' ') {
+        cursor += 1;
+      }
+      const token = value.slice(start, cursor);
+      if (!token || seen.has(token)) {
+        continue;
+      }
+      seen.add(token);
+      tokens.push(token);
+    }
+    return tokens;
+  }
+
+  function intersectSortedIndices(left, right) {
+    if (!left.length || !right.length) {
+      return [];
+    }
+    const matched = [];
+    let leftIndex = 0;
+    let rightIndex = 0;
+    while (leftIndex < left.length && rightIndex < right.length) {
+      const leftValue = left[leftIndex];
+      const rightValue = right[rightIndex];
+      if (leftValue === rightValue) {
+        matched.push(leftValue);
+        leftIndex += 1;
+        rightIndex += 1;
+        continue;
+      }
+      if (leftValue < rightValue) {
+        leftIndex += 1;
+      } else {
+        rightIndex += 1;
+      }
+    }
+    return matched;
+  }
+
+  function createPathwaySearchEngine(searchIndex) {
+    const queryCache = new Map();
+    const queryTokenCache = new Map();
+    const prefixIndex = new Map();
+    const exactTokenIndex = new Map();
+    const allEntryIndices = new Array(searchIndex.length);
+    const allPathways = [];
+    let lastQuery = '';
+    let lastQueryIndices = allEntryIndices;
+    let lastQueryPathways = allPathways;
+
+    for (let index = 0; index < searchIndex.length; index += 1) {
+      allEntryIndices[index] = index;
+      const entry = searchIndex[index];
+      if (!entry) {
+        continue;
+      }
+      allPathways.push(entry.pathway);
+      const uniqueTokens = new Set(tokenizeMatchQuery(entry.nameNormalized));
+      const prefixes = new Set();
+      for (const token of uniqueTokens) {
+        if (token.length < PATHWAY_SEARCH_MIN_PREFIX_TOKEN_LENGTH) {
+          continue;
+        }
+        const exactPostingList = exactTokenIndex.get(token);
+        if (exactPostingList) {
+          exactPostingList.push(index);
+        } else {
+          exactTokenIndex.set(token, [index]);
+        }
+        prefixes.add(token.slice(0, Math.min(PATHWAY_SEARCH_PREFIX_TOKEN_LENGTH, token.length)));
+      }
+      for (const prefix of prefixes) {
+        const postingList = prefixIndex.get(prefix);
+        if (postingList) {
+          postingList.push(index);
+        } else {
+          prefixIndex.set(prefix, [index]);
+        }
+      }
+    }
+
+    function getCachedQueryResult(query) {
+      const cached = queryCache.get(query);
+      if (!cached) {
+        return null;
+      }
+      queryCache.delete(query);
+      queryCache.set(query, cached);
+      return cached;
+    }
+
+    function cacheQueryResult(query, matchedIndices, matchedPathways) {
+      if (matchedIndices.length > PATHWAY_SEARCH_CACHEABLE_MATCH_LIMIT) {
+        return;
+      }
+      setBoundedMapEntry(
+        queryCache,
+        query,
+        {
+          indices: matchedIndices,
+          pathways: matchedPathways,
+        },
+        PATHWAY_SEARCH_CACHE_LIMIT,
+      );
+    }
+
+    function getCachedQueryTokens(query) {
+      const cached = getLruMapEntry(queryTokenCache, query);
+      if (cached !== null) {
+        return cached;
+      }
+      const tokens = tokenizeMatchQuery(query)
+        .filter((token) => token.length >= PATHWAY_SEARCH_MIN_PREFIX_TOKEN_LENGTH)
+        .sort((left, right) => right.length - left.length);
+      setBoundedMapEntry(queryTokenCache, query, tokens, PATHWAY_SEARCH_TOKEN_CACHE_LIMIT);
+      return tokens;
+    }
+
+    function mapIndicesToPathways(indices) {
+      const pathways = [];
+      for (let index = 0; index < indices.length; index += 1) {
+        const entry = searchIndex[indices[index]];
+        if (entry && entry.pathway) {
+          pathways.push(entry.pathway);
+        }
+      }
+      return pathways;
+    }
+
+    function rankMatchedEntryIndices(indices, tokens, query) {
+      if (indices.length <= 1 || indices.length > 1200) {
+        return indices;
+      }
+      const paddedQuery = ` ${query} `;
+      return indices
+        .slice()
+        .sort((leftIndex, rightIndex) => {
+          const leftEntry = searchIndex[leftIndex];
+          const rightEntry = searchIndex[rightIndex];
+          if (!leftEntry || !rightEntry) {
+            return leftIndex - rightIndex;
+          }
+
+          const leftName = leftEntry.nameNormalized || '';
+          const rightName = rightEntry.nameNormalized || '';
+          const leftPaddedName = ` ${leftName} `;
+          const rightPaddedName = ` ${rightName} `;
+          let leftScore = 0;
+          let rightScore = 0;
+
+          if (leftName === query) {
+            leftScore += 48;
+          } else if (leftName.startsWith(query)) {
+            leftScore += 18;
+          } else if (leftPaddedName.includes(paddedQuery)) {
+            leftScore += 12;
+          }
+          if (rightName === query) {
+            rightScore += 48;
+          } else if (rightName.startsWith(query)) {
+            rightScore += 18;
+          } else if (rightPaddedName.includes(paddedQuery)) {
+            rightScore += 12;
+          }
+
+          for (let tokenIndex = 0; tokenIndex < tokens.length; tokenIndex += 1) {
+            const token = tokens[tokenIndex];
+            const paddedToken = ` ${token} `;
+            if (leftPaddedName.includes(paddedToken)) {
+              leftScore += 7;
+            } else if (leftName.includes(token)) {
+              leftScore += 3;
+            }
+            if (rightPaddedName.includes(paddedToken)) {
+              rightScore += 7;
+            } else if (rightName.includes(token)) {
+              rightScore += 3;
+            }
+          }
+
+          if (leftScore !== rightScore) {
+            return rightScore - leftScore;
+          }
+
+          const leftPadj = nullableNumber(leftEntry.pathway?.padj);
+          const rightPadj = nullableNumber(rightEntry.pathway?.padj);
+          const leftPadjSafe = Number.isFinite(leftPadj) ? leftPadj : Number.POSITIVE_INFINITY;
+          const rightPadjSafe = Number.isFinite(rightPadj) ? rightPadj : Number.POSITIVE_INFINITY;
+          if (leftPadjSafe !== rightPadjSafe) {
+            return leftPadjSafe - rightPadjSafe;
+          }
+
+          const leftNesAbs = Math.abs(Number(leftEntry.pathway?.nes || 0));
+          const rightNesAbs = Math.abs(Number(rightEntry.pathway?.nes || 0));
+          if (leftNesAbs !== rightNesAbs) {
+            return rightNesAbs - leftNesAbs;
+          }
+
+          return leftIndex - rightIndex;
+        });
+    }
+
+    function selectSeedEntryIndices(tokens) {
+      const postingLists = [];
+      const seenTokens = new Set();
+      for (let index = 0; index < tokens.length; index += 1) {
+        const token = tokens[index];
+        if (seenTokens.has(token)) {
+          continue;
+        }
+        seenTokens.add(token);
+        const exactPostingList = exactTokenIndex.get(token);
+        if (exactPostingList && exactPostingList.length) {
+          postingLists.push(exactPostingList);
+          continue;
+        }
+        if (token.length < PATHWAY_SEARCH_MIN_PREFIX_TOKEN_LENGTH) {
+          continue;
+        }
+        const prefix = token.slice(0, Math.min(PATHWAY_SEARCH_PREFIX_TOKEN_LENGTH, token.length));
+        const postingList = prefixIndex.get(prefix);
+        if (postingList && postingList.length) {
+          postingLists.push(postingList);
+        }
+      }
+      if (!postingLists.length) {
+        return null;
+      }
+
+      postingLists.sort((left, right) => left.length - right.length);
+      let candidateIndices = postingLists[0].slice();
+      const mergeLimit = Math.min(PATHWAY_SEARCH_PREFIX_INTERSECTION_LIMIT, postingLists.length);
+      for (let index = 1; index < mergeLimit; index += 1) {
+        if (!candidateIndices.length) {
+          break;
+        }
+        candidateIndices = intersectSortedIndices(candidateIndices, postingLists[index]);
+      }
+
+      return candidateIndices;
+    }
+
+    return {
+      filter(query) {
+        if (!query) {
+          lastQuery = '';
+          lastQueryIndices = allEntryIndices;
+          lastQueryPathways = allPathways;
+          return [];
+        }
+
+        if (query === lastQuery) {
+          return lastQueryPathways;
+        }
+
+        const cached = getCachedQueryResult(query);
+        if (cached) {
+          lastQuery = query;
+          lastQueryIndices = cached.indices;
+          lastQueryPathways = cached.pathways;
+          return cached.pathways;
+        }
+
+        const tokens = getCachedQueryTokens(query);
+        if (!tokens.length) {
+          lastQuery = query;
+          lastQueryIndices = allEntryIndices;
+          lastQueryPathways = allPathways;
+          return allPathways;
+        }
+
+        const incrementalSeed =
+          lastQuery && query.startsWith(lastQuery) ? lastQueryIndices : null;
+        const prefixSeedIndices = selectSeedEntryIndices(tokens);
+        const baseEntryIndices = incrementalSeed || prefixSeedIndices || allEntryIndices;
+
+        const matchedEntryIndices = [];
+        for (let baseIndex = 0; baseIndex < baseEntryIndices.length; baseIndex += 1) {
+          const entryIndex = baseEntryIndices[baseIndex];
+          const entry = searchIndex[entryIndex];
+          if (!entry) {
+            continue;
+          }
+          let matchesAllTokens = true;
+          for (let tokenIndex = 0; tokenIndex < tokens.length; tokenIndex += 1) {
+            if (!entry.nameNormalized.includes(tokens[tokenIndex])) {
+              matchesAllTokens = false;
+              break;
+            }
+          }
+          if (matchesAllTokens) {
+            matchedEntryIndices.push(entryIndex);
+          }
+        }
+
+        const rankedEntryIndices = rankMatchedEntryIndices(matchedEntryIndices, tokens, query);
+        const matchedPathways = mapIndicesToPathways(rankedEntryIndices);
+        cacheQueryResult(query, rankedEntryIndices, matchedPathways);
+        lastQuery = query;
+        lastQueryIndices = rankedEntryIndices;
+        lastQueryPathways = matchedPathways;
+        return matchedPathways;
+      },
+    };
+  }
+
   function normalizeMatchToken(value) {
     return String(value || '')
       .toLowerCase()
-      .replace(/[_-]+/g, ' ')
+      .replace(/&/g, ' and ')
+      .replace(/[^a-z0-9]+/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
   }
@@ -2440,18 +3030,35 @@
             </section>
           </main>
           <script>
-            (function () {
+            (async function () {
               const payload = ${payloadScript};
               const openerWindow = window.opener || null;
-              const Plotly = window.Plotly || (openerWindow && openerWindow.Plotly ? openerWindow.Plotly : null);
+              const ensurePlotlyRuntime =
+                (openerWindow && typeof openerWindow.__PNV_ENSURE_PLOTLY_RUNTIME__ === 'function'
+                  ? openerWindow.__PNV_ENSURE_PLOTLY_RUNTIME__
+                  : typeof window.__PNV_ENSURE_PLOTLY_RUNTIME__ === 'function'
+                    ? window.__PNV_ENSURE_PLOTLY_RUNTIME__
+                    : null);
+              let Plotly = window.Plotly || (openerWindow && openerWindow.Plotly ? openerWindow.Plotly : null);
               const runtimeSource = openerWindow || window;
-              const JsPdfCtor = runtimeSource.jspdf && runtimeSource.jspdf.jsPDF ? runtimeSource.jspdf.jsPDF : null;
-              const svg2pdf = typeof runtimeSource.svg2pdf === 'function'
+              let JsPdfCtor = runtimeSource.jspdf && runtimeSource.jspdf.jsPDF ? runtimeSource.jspdf.jsPDF : null;
+              let svg2pdf = typeof runtimeSource.svg2pdf === 'function'
                 ? runtimeSource.svg2pdf
                 : runtimeSource.svg2pdf && typeof runtimeSource.svg2pdf.svg2pdf === 'function'
                   ? runtimeSource.svg2pdf.svg2pdf
                   : null;
+              const ensurePdfRuntime =
+                (openerWindow && typeof openerWindow.__PNV_ENSURE_PDF_EXPORT_RUNTIME__ === 'function'
+                  ? openerWindow.__PNV_ENSURE_PDF_EXPORT_RUNTIME__
+                  : typeof window.__PNV_ENSURE_PDF_EXPORT_RUNTIME__ === 'function'
+                    ? window.__PNV_ENSURE_PDF_EXPORT_RUNTIME__
+                    : null);
               const plotEl = document.getElementById('heatmap');
+              if (!Plotly && ensurePlotlyRuntime) {
+                try {
+                  Plotly = await ensurePlotlyRuntime();
+                } catch {}
+              }
               if (!Plotly) {
                 plotEl.innerHTML = '<div style="padding:24px;color:#8a2640">Plotly runtime is unavailable. Re-open heatmap from the generated report to restore plotting support.</div>';
                 document.getElementById('download-svg').disabled = true;
@@ -2460,9 +3067,11 @@
                 return;
               }
               if (!JsPdfCtor || !svg2pdf) {
-                const pdfButton = document.getElementById('download-pdf');
-                pdfButton.disabled = true;
-                pdfButton.title = 'PDF export runtime is unavailable in this browser session.';
+                if (!ensurePdfRuntime) {
+                  const pdfButton = document.getElementById('download-pdf');
+                  pdfButton.disabled = true;
+                  pdfButton.title = 'PDF export runtime is unavailable in this browser session.';
+                }
               }
 
               const baseWidth = Math.max(980, payload.samples.length * 34 + 340);
@@ -2608,6 +3217,13 @@
               }
 
               async function downloadPdf() {
+                if ((!JsPdfCtor || !svg2pdf) && ensurePdfRuntime) {
+                  try {
+                    const loaded = await ensurePdfRuntime();
+                    JsPdfCtor = loaded && loaded.jsPDF ? loaded.jsPDF : JsPdfCtor;
+                    svg2pdf = loaded && loaded.svg2pdf ? loaded.svg2pdf : svg2pdf;
+                  } catch {}
+                }
                 if (!JsPdfCtor || !svg2pdf) {
                   window.alert('PDF export runtime is unavailable in this browser session. Use SVG export.');
                   return;
@@ -2674,6 +3290,71 @@
     return String(value || '').replace(/<\/script/gi, '<\\/script');
   }
 
+  function getSvg2PdfRuntime(runtimeSource = window) {
+    if (typeof runtimeSource.svg2pdf === 'function') {
+      return runtimeSource.svg2pdf;
+    }
+    if (runtimeSource.svg2pdf && typeof runtimeSource.svg2pdf.svg2pdf === 'function') {
+      return runtimeSource.svg2pdf.svg2pdf;
+    }
+    return null;
+  }
+
+  function hydrateEmbeddedRuntimeScript(sourceId) {
+    const sourceEl = document.getElementById(sourceId);
+    if (!sourceEl) {
+      return false;
+    }
+    const sourceText = sourceEl.textContent || '';
+    sourceEl.remove();
+    if (!sourceText.trim()) {
+      return false;
+    }
+    const scriptEl = document.createElement('script');
+    scriptEl.text = sourceText;
+    scriptEl.setAttribute('data-pnv-runtime-source', sourceId);
+    document.head.appendChild(scriptEl);
+    return true;
+  }
+
+  async function ensurePlotlyRuntimeLoaded() {
+    if (window.Plotly) {
+      return window.Plotly;
+    }
+    const loaded = hydrateEmbeddedRuntimeScript('pnv-plotly-source');
+    if (loaded) {
+      await Promise.resolve();
+    }
+    if (!window.Plotly) {
+      throw new Error('Plot runtime is unavailable');
+    }
+    return window.Plotly;
+  }
+
+  async function ensurePdfExportRuntimeLoaded() {
+    let jsPDF = window.jspdf && window.jspdf.jsPDF ? window.jspdf.jsPDF : null;
+    let svg2pdf = getSvg2PdfRuntime(window);
+    if (jsPDF && svg2pdf) {
+      return { jsPDF, svg2pdf };
+    }
+
+    const loadedPdf = hydrateEmbeddedRuntimeScript('pnv-jspdf-source');
+    const loadedSvg = hydrateEmbeddedRuntimeScript('pnv-svg2pdf-source');
+    const loadedAnyScript = loadedPdf || loadedSvg;
+    if (loadedAnyScript) {
+      await Promise.resolve();
+      jsPDF = window.jspdf && window.jspdf.jsPDF ? window.jspdf.jsPDF : null;
+      svg2pdf = getSvg2PdfRuntime(window);
+    }
+    if (!jsPDF || !svg2pdf) {
+      throw new Error('PDF export runtime is unavailable');
+    }
+    return { jsPDF, svg2pdf };
+  }
+
+  window.__PNV_ENSURE_PLOTLY_RUNTIME__ = ensurePlotlyRuntimeLoaded;
+  window.__PNV_ENSURE_PDF_EXPORT_RUNTIME__ = ensurePdfExportRuntimeLoaded;
+
   async function exportFigure(pathway, target, format, preset, dpi) {
     if (!preset) {
       throw new Error('Unknown export preset selected.');
@@ -2719,13 +3400,90 @@
     };
   }
 
-  async function getPlotSvg(width = 920, height = 460) {
-    const svgDataUrl = await Plotly.toImage('plot-container', {
-      format: 'svg',
-      width,
-      height,
-    });
-    return dataUrlToString(svgDataUrl);
+  function buildEnrichmentPlotSvg(pathway, options = {}) {
+    const width = Math.max(260, Number(options.width) || 920);
+    const height = Math.max(220, Number(options.height) || 460);
+    const showFrame = options.showFrame !== false;
+    const points = Array.isArray(pathway?.enrichment?.points) ? pathway.enrichment.points : [];
+    const hitIndices = Array.isArray(pathway?.enrichment?.hitIndices) ? pathway.enrichment.hitIndices : [];
+    if (!points.length) {
+      return `
+        <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+          <rect width="100%" height="100%" fill="${showFrame ? '#f8fbff' : 'transparent'}" rx="${showFrame ? 14 : 0}" />
+          <text x="${width / 2}" y="${height / 2}" font-size="13" text-anchor="middle" fill="#6b7f9f">No enrichment points available</text>
+        </svg>
+      `;
+    }
+
+    const margin = { left: 54, right: 18, top: 16, bottom: 40 };
+    const innerWidth = Math.max(120, width - margin.left - margin.right);
+    const innerHeight = Math.max(90, height - margin.top - margin.bottom);
+    const maxRank = Math.max(1, Number(points[points.length - 1]?.index || points.length - 1));
+    const maxAbsValue = Math.max(0.08, Number(pathway?.enrichment?.maxAbsValue || 0.08));
+    const safeValue = (value) => {
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric)) {
+        return 0;
+      }
+      return clamp(numeric, -maxAbsValue, maxAbsValue);
+    };
+    const xAt = (rank) => margin.left + (clamp(Number(rank) || 0, 0, maxRank) / maxRank) * innerWidth;
+    const yAt = (value) => margin.top + ((maxAbsValue - safeValue(value)) / (maxAbsValue * 2)) * innerHeight;
+    const pathD = points
+      .map((point, index) => `${index === 0 ? 'M' : 'L'} ${xAt(point.index).toFixed(2)} ${yAt(point.value).toFixed(2)}`)
+      .join(' ');
+    const zeroY = yAt(0);
+    const axisBottom = margin.top + innerHeight;
+    const hitLimit = innerWidth < 460 ? 460 : innerWidth < 700 ? 720 : 960;
+    const hitStride = hitIndices.length > hitLimit ? Math.ceil(hitIndices.length / hitLimit) : 1;
+    const hitTickHeight = Math.max(7, innerHeight * 0.06);
+    const sampledHits = hitIndices.filter((_, index) => index % hitStride === 0);
+    const hitLines = sampledHits
+      .map((rank) => {
+        const x = xAt(rank).toFixed(2);
+        return `<line x1="${x}" y1="${(axisBottom - hitTickHeight).toFixed(2)}" x2="${x}" y2="${axisBottom.toFixed(2)}" stroke="#102039" stroke-opacity="0.66" stroke-width="1"/>`;
+      })
+      .join('');
+    const peak = summarizeEnrichment(pathway);
+    const peakX = xAt(peak.peakRank || 0);
+    const peakY = yAt(peak.peakEs || 0);
+    const axisLabelY = height - 8;
+    const yAxisLabelX = 14;
+    const yAxisLabelY = margin.top + innerHeight / 2;
+    const roundedRankTicks = [0, 0.25, 0.5, 0.75, 1].map((fraction) => Math.round(maxRank * fraction));
+    const rankTicks = Array.from(new Set(roundedRankTicks))
+      .map((rank) => {
+        const x = xAt(rank);
+        return `<line x1="${x.toFixed(2)}" y1="${axisBottom.toFixed(2)}" x2="${x.toFixed(2)}" y2="${(axisBottom + 4).toFixed(2)}" stroke="#7a97c9" stroke-width="1"/><text x="${x.toFixed(2)}" y="${(axisBottom + 16).toFixed(2)}" text-anchor="middle" font-size="10" fill="#5d708e">${rank}</text>`;
+      })
+      .join('');
+
+    return `
+      <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+        <defs>
+          <linearGradient id="pnv-plot-bg" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stop-color="#f7faff"/>
+            <stop offset="100%" stop-color="#edf4ff"/>
+          </linearGradient>
+          <linearGradient id="pnv-plot-line" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stop-color="#245ed6"/>
+            <stop offset="100%" stop-color="#2f78ff"/>
+          </linearGradient>
+        </defs>
+        <rect x="0" y="0" width="${width}" height="${height}" fill="${showFrame ? 'url(#pnv-plot-bg)' : 'transparent'}" rx="${showFrame ? 14 : 0}" />
+        <rect x="${margin.left}" y="${margin.top}" width="${innerWidth}" height="${innerHeight}" fill="rgba(255,255,255,0.62)" stroke="#d6e3f8"/>
+        <line x1="${margin.left}" y1="${zeroY.toFixed(2)}" x2="${(margin.left + innerWidth).toFixed(2)}" y2="${zeroY.toFixed(2)}" stroke="#8ea6cc" stroke-dasharray="5 4" stroke-width="1"/>
+        ${hitLines}
+        <path d="${pathD}" fill="none" stroke="url(#pnv-plot-line)" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/>
+        <circle cx="${peakX.toFixed(2)}" cy="${peakY.toFixed(2)}" r="4.2" fill="#102039" />
+        <text x="${Math.max(margin.left + 8, Math.min(width - margin.right - 80, peakX + 8)).toFixed(2)}" y="${(Math.max(margin.top + 14, peakY - 10)).toFixed(2)}" font-size="10" fill="#102039">Peak ${formatSignedNumber(peak.peakEs)}</text>
+        <line x1="${margin.left}" y1="${margin.top}" x2="${margin.left}" y2="${axisBottom}" stroke="#7a97c9" stroke-width="1.1"/>
+        <line x1="${margin.left}" y1="${axisBottom}" x2="${(margin.left + innerWidth).toFixed(2)}" y2="${axisBottom}" stroke="#7a97c9" stroke-width="1.1"/>
+        ${rankTicks}
+        <text x="${margin.left + innerWidth / 2}" y="${axisLabelY}" text-anchor="middle" font-size="11" fill="#4b6286">Rank in ordered gene list</text>
+        <text x="${yAxisLabelX}" y="${yAxisLabelY.toFixed(2)}" transform="rotate(-90 ${yAxisLabelX} ${yAxisLabelY.toFixed(2)})" text-anchor="middle" font-size="11" fill="#4b6286">Running enrichment score</text>
+      </svg>
+    `;
   }
 
   async function buildPlotFigureSvg(pathway, preset) {
@@ -2741,7 +3499,7 @@
     const minPlotHeight = 210;
     const heightPt = Math.max(baseHeightPt, plotY + minPlotHeight + 18);
     const plotHeight = Math.max(minPlotHeight, heightPt - plotY - 18);
-    const plotSvg = wrapStandaloneSvg(await getPlotSvg(1100, 620), {
+    const plotSvg = wrapStandaloneSvg(buildEnrichmentPlotSvg(pathway, { width: 1100, height: 620 }), {
       key: 'plot',
       widthInches: Math.max(1, (widthPt - 28) / 72),
       heightInches: Math.max(1, plotHeight / 72),
@@ -2749,7 +3507,7 @@
     const titleTspans = titleLines
       .map((line, index) => `<tspan x="24" dy="${index === 0 ? 0 : titleLineHeight}">${escapeXml(line)}</tspan>`)
       .join('');
-    const statsLineA = `NES ${formatSignedNumber(pathway.nes)} · FDR ${formatSci(pathway.padj)} · Peak ES ${formatSignedNumber(summary.peakEs)} · Peak rank ${summary.peakRank}/${summary.rankedListSize}`;
+    const statsLineA = `NES ${formatSignedNumber(pathway.nes)} · FDR ${formatSci(pathway.padj)} · Peak ES ${formatSignedNumber(summary.peakEs)} · Peak rank ${summary.peakRank ?? 'NA'}/${summary.rankedListSize}`;
     const statsLineB = `Hits ${summary.hitCount} · Leading edge ${summary.leadingEdgeCount} · Members ${summary.memberCount}${summary.peakGene ? ` · Peak gene ${summary.peakGene}` : ''}`;
 
     return `
@@ -2795,7 +3553,7 @@
       widthInches: Math.max(1, (networkCardWidth - innerPad * 2) / 72),
       heightInches: Math.max(1, (networkCardHeight - 46 - innerPad * 2) / 72),
     });
-    const plotSvg = wrapStandaloneSvg(await getPlotSvg(1100, 700), {
+    const plotSvg = wrapStandaloneSvg(buildEnrichmentPlotSvg(pathway, { width: 1100, height: 700 }), {
       key: 'plot',
       widthInches: Math.max(1, (plotCardWidth - innerPad * 2) / 72),
       heightInches: Math.max(1, (plotCardHeight - 46 - innerPad * 2) / 72),
@@ -2803,9 +3561,9 @@
     const titleTspans = titleLines
       .map((line, index) => `<tspan x="24" dy="${index === 0 ? 0 : titleLineHeight}">${escapeXml(line)}</tspan>`)
       .join('');
-    const statsLineA = `NES ${formatSignedNumber(pathway.nes)} · FDR ${formatSci(pathway.padj)} · Peak ES ${formatSignedNumber(summary.peakEs)} · Peak rank ${summary.peakRank}/${summary.rankedListSize}`;
+    const statsLineA = `NES ${formatSignedNumber(pathway.nes)} · FDR ${formatSci(pathway.padj)} · Peak ES ${formatSignedNumber(summary.peakEs)} · Peak rank ${summary.peakRank ?? 'NA'}/${summary.rankedListSize}`;
     const statsLineB = `Visible genes ${visibleNodes.length}/${pathway.allGenes.length} · Edges ${visibleEdges.length} · Leading edge ${summary.leadingEdgeCount} · Hits ${summary.hitCount}${summary.peakGene ? ` · Peak gene ${summary.peakGene}` : ''}`;
-    const viewLine = `View ${state.showAllGenes && !pathway.fallbackToLeadingEdge ? 'All genes' : 'Leading edge'} · PPI ${state.ppiMode} · Min score ${state.edgeScoreMin} · Top genes ${state.topGeneCount || 'All'} · Top edges ${state.topEdgePercentile}% · Node size ${Math.round(state.nodeSizeScale * 100)}%`;
+    const viewLine = `View ${state.showAllGenes && !pathway.fallbackToLeadingEdge ? ((evidence.pathways?.[pathway.pathwayId]?.testedGenes || evidence.pathways?.[pathway.key]?.testedGenes) ? 'All tested pathway genes' : 'Supplied/reference genes') : 'Leading edge'} · PPI ${state.ppiMode} · Min score ${state.edgeScoreMin} · Top genes ${state.topGeneCount || 'All'} · Top edges ${state.topEdgePercentile}% · Node size ${Math.round(state.nodeSizeScale * 100)}%`;
 
     return `
       <svg xmlns="http://www.w3.org/2000/svg" width="${widthPt}pt" height="${heightPt}pt" viewBox="0 0 ${widthPt} ${heightPt}">
@@ -2845,18 +3603,7 @@
     if (format === 'pdf') {
       const doc = new DOMParser().parseFromString(svgText, 'image/svg+xml');
       const svgElement = doc.documentElement;
-      if (!window.jspdf || !window.jspdf.jsPDF) {
-        throw new Error('PDF export runtime is unavailable');
-      }
-      const { jsPDF } = window.jspdf;
-      const svg2pdf = typeof window.svg2pdf === 'function'
-        ? window.svg2pdf
-        : window.svg2pdf && typeof window.svg2pdf.svg2pdf === 'function'
-          ? window.svg2pdf.svg2pdf
-          : null;
-      if (!svg2pdf) {
-        throw new Error('svg2pdf runtime is unavailable');
-      }
+      const { jsPDF, svg2pdf } = await ensurePdfExportRuntimeLoaded();
       const pdf = new jsPDF({
         unit: 'pt',
         format: [preset.widthInches * 72, preset.heightInches * 72],
@@ -2937,13 +3684,6 @@
     });
   }
 
-  function dataUrlToString(value) {
-    const [, payload] = value.split(',');
-    return value.includes(';base64,')
-      ? atob(payload)
-      : decodeURIComponent(payload);
-  }
-
   function downloadBlob(filename, blob) {
     const href = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
@@ -2967,7 +3707,9 @@
     const points = pathway?.enrichment?.points || [];
     const rankedListSize = points.length ? Number(points[points.length - 1].index || 0) : 0;
     let peakPoint = points[0] || { index: 0, value: 0, gene: '' };
-    const preferPositive = Number(pathway?.nes || 0) >= 0;
+    const recordedEs = nullableNumber(pathway?.enrichment?.es);
+    const unavailableEs = pathway?.enrichment?.validation === 'unavailable' || pathway?.enrichment?.es === null || !points.length;
+    const preferPositive = (recordedEs === null ? Number(pathway?.nes || 0) : recordedEs) >= 0;
 
     points.forEach((point) => {
       if (!Number.isFinite(Number(point?.value))) {
@@ -2985,8 +3727,8 @@
     });
 
     return {
-      peakEs: Number(peakPoint?.value || 0),
-      peakRank: Number(peakPoint?.index || 0),
+      peakEs: unavailableEs ? null : recordedEs === null ? Number(peakPoint?.value || 0) : recordedEs,
+      peakRank: unavailableEs ? null : recordedEs === 0 ? 0 : Number(peakPoint?.index || 0),
       peakGene: peakPoint?.gene || '',
       hitCount: Number(pathway?.enrichment?.hitIndices?.length || 0),
       leadingEdgeCount: Number(pathway?.leadingEdgeGenes?.length || 0),
@@ -3025,8 +3767,120 @@
       .slice(0, 80);
   }
 
-  function formatNumber(value) {
+  function renderEvidenceHeader() {
+    const verification = evidence.verification || { status: 'unverifiable', checks: [], limitations: [] };
+    const labels = {
+      verified_against_supplied_artifacts: 'Verified against supplied artifacts at report generation',
+      internally_consistent: 'Internal consistency only', unverifiable: 'Source verification unavailable', mismatch: 'Evidence mismatch detected',
+    };
+    const analysis = evidence.analysis || {};
+    const integrated = fullEvidence ? `<div id="evidence-summary" class="evidence-summary">
+      <h2>Analysis evidence</h2><strong>${escapeHtml(labels[verification.status] || labels.unverifiable)}</strong>
+      <p>Method: ${escapeHtml(analysis.method || 'Not recorded')} · Design: ${escapeHtml(analysis.designFormula || 'Not recorded')} · Rank: ${escapeHtml(analysis.rankMetric || 'Not recorded')}</p>
+      <p>Effect estimate: ${escapeHtml(analysis.lfcMethod || 'Not recorded')} · Adjustment: ${escapeHtml(analysis.adjustment || 'Not recorded')}</p>
+      <p>Report significance threshold: ${formatNumber(data.significantPadjThreshold)} · Original analysis alpha: ${formatNumber(analysis.alpha)}</p>
+      <p>Verification describes checks performed at report generation. Opening this report offline does not recheck original files that are unavailable to the report.</p>
+      <p>Run: ${escapeHtml(evidence.runId || 'Not recorded')}. A digest checks file identity; it does not establish biological truth or validate original sample labels.</p>
+      ${(verification.checks || []).map(check => `<div class="evidence-check"><strong>${escapeHtml(check.status)}</strong> ${escapeHtml(check.message)}</div>`).join('')}
+      ${(verification.limitations || []).map(item => `<p class="muted">${escapeHtml(item)}</p>`).join('')}
+    </div>` : '';
+    return `<section class="panel evidence-panel" aria-label="Report evidence">${integrated}
+      <details id="raw-evidence"><summary>Source tables and analysis records</summary>
+        <p>These source records are available in both report conditions. Row numbers count data rows, excluding the header.</p>
+        <button type="button" id="download-evidence" class="tool-button">Download all evidence JSON</button>
+        <label>Source table <select id="source-table-select" class="select-control">${Object.keys(sourceTables).map(name => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('')}</select></label>
+        <button type="button" id="download-source-table" class="tool-button">Download selected table TSV</button>
+        <div class="source-table-controls"><button type="button" id="source-previous" class="tool-button">Previous rows</button><span id="source-table-position"></span><button type="button" id="source-next" class="tool-button">Next rows</button></div>
+        <div id="source-table-content" class="source-table-content"></div>
+        <details><summary>Method, provenance and sensitivity records</summary><pre id="raw-evidence-records"></pre></details>
+      </details>
+    </section>`;
+  }
+
+  function installEvidenceControls() {
+    const raw = document.getElementById('raw-evidence');
+    const select = document.getElementById('source-table-select');
+    raw.addEventListener('toggle', () => { if (raw.open) renderSourceTable(); });
+    select.addEventListener('change', () => { sourceTableOffset = 0; renderSourceTable(); });
+    document.getElementById('source-previous').addEventListener('click', () => { sourceTableOffset = Math.max(0, sourceTableOffset - 50); renderSourceTable(); });
+    document.getElementById('source-next').addEventListener('click', () => {
+      const total = sourceTables[select.value]?.rows.length || 0;
+      sourceTableOffset = Math.min(Math.max(0, total - 1), sourceTableOffset + 50); renderSourceTable();
+    });
+    document.getElementById('download-evidence').addEventListener('click', () => saveEvidenceFile('analysis-evidence.json', JSON.stringify(evidence, null, 2), 'application/json'));
+    document.getElementById('download-source-table').addEventListener('click', () => {
+      const table = sourceTables[select.value];
+      if (!table) return;
+      const cell = value => String(value ?? '').replace(/[\t\r\n]/g, ' ');
+      saveEvidenceFile(`${slugify(select.value) || 'source'}.tsv`, [table.columns, ...table.rows].map(row => row.map(cell).join('\t')).join('\n'), 'text/tab-separated-values');
+    });
+    const { sourceTables: omitted, ...records } = evidence;
+    document.getElementById('raw-evidence-records').textContent = JSON.stringify({ provenance: data.provenance || {}, ...records }, null, 2);
+    app.addEventListener('click', event => {
+      const button = event.target.closest?.('[data-source-table]');
+      if (!button || !Object.hasOwn(sourceTables, button.dataset.sourceTable)) return;
+      select.value = button.dataset.sourceTable;
+      sourceTableOffset = Math.max(0, Number(button.dataset.sourceRow || 1) - 1);
+      raw.open = true; renderSourceTable(); raw.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    });
+  }
+
+  function saveEvidenceFile(filename, text, mime) {
+    const href = URL.createObjectURL(new Blob([text], { type: mime }));
+    const anchor = document.createElement('a'); anchor.href = href; anchor.download = filename; anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(href), 1000);
+  }
+
+  function renderSourceTable() {
+    const name = document.getElementById('source-table-select').value;
+    const table = sourceTables[name];
+    const container = document.getElementById('source-table-content');
+    if (!table) { container.textContent = 'No source table was supplied.'; return; }
+    const rows = table.rows.slice(sourceTableOffset, sourceTableOffset + 50);
+    document.getElementById('source-table-position').textContent = `${table.rows.length ? sourceTableOffset + 1 : 0}–${sourceTableOffset + rows.length} / ${table.rows.length}`;
+    document.getElementById('source-previous').disabled = sourceTableOffset === 0;
+    document.getElementById('source-next').disabled = sourceTableOffset + rows.length >= table.rows.length;
+    container.innerHTML = `<table><thead><tr><th>Row</th>${table.columns.map(column => `<th>${escapeHtml(column)}</th>`).join('')}</tr></thead><tbody>${rows.map((row, index) => `<tr><td>${sourceTableOffset + index + 1}</td>${row.map(value => `<td>${value === null ? 'NA' : escapeHtml(String(value))}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+  }
+
+  function geneEvidenceMarkup(gene) {
+    let source = '';
+    for (const tableName of ['genes', 'Genes']) {
+      const table = sourceTables[tableName];
+      if (!table) continue;
+      const column = table.columns.findIndex(name => ['gene', 'gene_symbol'].includes(name));
+      if (column < 0) continue;
+      const row = table.rows.findIndex(values => values[column] === gene.id);
+      if (row >= 0) {
+        source = `<button type="button" class="tool-button" data-source-table="${escapeHtml(tableName)}" data-source-row="${row + 1}">Gene source row ${row + 1}</button>`;
+        break;
+      }
+    }
+    return `${source}${gene.statisticsReason ? `<p class="muted">${escapeHtml(gene.statisticsReason)}</p>` : ''}`;
+  }
+
+  function renderPathwayEvidence(pathway) {
+    const element = document.getElementById('pathway-evidence');
+    if (!fullEvidence) return;
+    const detail = evidence.pathways?.[pathway.pathwayId] || evidence.pathways?.[pathway.key] || {};
+    const source = detail.source || pathway.source;
+    const sourceLink = source && Object.hasOwn(sourceTables, source.table)
+      ? `<button type="button" class="tool-button" data-source-table="${escapeHtml(source.table)}" data-source-row="${escapeHtml(String(source.row))}">Source: ${escapeHtml(source.table)}, row ${escapeHtml(String(source.row))}</button>` : '<span>Source row not recorded</span>';
+    const camera = detail.camera, bootstrap = detail.bootstrap;
+    element.innerHTML = `${sourceLink}${pathway.statisticsReason ? `<p>${escapeHtml(pathway.statisticsReason)}</p>` : ''}
+      ${(detail.designSensitivity || []).map(design => `<p>Design sensitivity: ${escapeHtml(design.designFormula)} · NES ${formatNumber(design.nes)} · FDR ${formatSci(design.padj)}. The prespecified primary design remains unchanged.${design.source && Object.hasOwn(sourceTables, design.source.table) ? ` <button type="button" class="tool-button" data-source-table="${escapeHtml(design.source.table)}" data-source-row="${escapeHtml(String(design.source.row))}">Design source row ${escapeHtml(String(design.source.row))}</button>` : ''}</p>`).join('')}
+      ${camera ? `<p>CAMERA sensitivity: direction ${escapeHtml(camera.direction || 'NA')} · FDR ${formatSci(camera.padj)}. This is a different competitive test; its FDR is not combined with fgsea.</p>` : ''}
+      ${bootstrap ? `<p>Sample resampling: selected ${formatNumber(bootstrap.selectionFrequency === null ? null : 100 * bootstrap.selectionFrequency)}% · direction retained ${formatNumber(bootstrap.directionConsistency === null ? null : 100 * bootstrap.directionConsistency)}% · tested ${bootstrap.valid}/${bootstrap.requested} repetitions.</p><p class="muted">Descriptive stability within these data; not a replication probability or an adjusted p-value.</p>${bootstrap.warning || bootstrap.validFraction < 0.9 ? `<p class="evidence-warning">${escapeHtml(bootstrap.warning || 'Fewer than 90% of repetitions were testable.')}</p>` : ''}` : ''}`;
+  }
+
+  function nullableNumber(value) {
+    if (value === null || value === undefined || value === '') return null;
     const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : null;
+  }
+
+  function formatNumber(value) {
+    const numeric = nullableNumber(value);
     if (!Number.isFinite(numeric)) {
       return 'NA';
     }
@@ -3034,12 +3888,12 @@
   }
 
   function formatSignedNumber(value) {
-    const numeric = Number(value);
-    return `${numeric > 0 ? '+' : ''}${formatNumber(numeric)}`;
+    const numeric = nullableNumber(value);
+    return numeric === null ? 'NA' : `${numeric > 0 ? '+' : ''}${formatNumber(numeric)}`;
   }
 
   function formatSci(value) {
-    const numeric = Number(value);
+    const numeric = nullableNumber(value);
     return Number.isFinite(numeric) ? numeric.toExponential(2) : 'NA';
   }
 
@@ -3051,6 +3905,11 @@
       hour: '2-digit',
       minute: '2-digit',
     });
+  }
+
+  function formatProvenanceValue(value, fallback) {
+    const normalized = String(value || '').trim();
+    return normalized || fallback;
   }
 
   function formatConditionLabel(value) {
@@ -3167,6 +4026,37 @@
     }
   }
 
+  window.__PNV_RUNTIME_DEBUG__ = function runtimeDebugSnapshot() {
+    return {
+      pathwayCount: allPathways.length,
+      filteredPathwayCount: getFilteredPathways().length,
+      currentPathwayKey: state.currentPathwayKey,
+      search: state.search,
+      cache: {
+        tableSort: tableSortCache.size,
+        networkView: networkViewCache.size,
+        geneDetailSampleRows: geneDetailSampleRowsCache.size,
+        pathwayNodeLookup: pathwayNodeLookupCache.size,
+        pathwayRenderPrep: pathwayRenderPrepCache.size,
+        pathwayGeneSet: pathwayGeneSetCache.size,
+      },
+      pathwayList: {
+        visibleCount: Math.min(pathwayListVisibleCount, getFilteredPathways().length),
+        totalCount: getFilteredPathways().length,
+      },
+      network: {
+        nodeCount: cy.nodes().length,
+        edgeCount: cy.edges().length,
+        layoutMode: state.layoutMode,
+        ppiMode: state.ppiMode,
+        topGeneCount: state.topGeneCount,
+        topEdgePercentile: state.topEdgePercentile,
+      },
+      memoryHintGb: DEVICE_MEMORY_GB,
+      timestamp: new Date().toISOString(),
+    };
+  };
+
   function applySavedPreferences() {
     try {
       const raw = window.localStorage.getItem(STORAGE_KEY);
@@ -3223,11 +4113,11 @@
     if (labelCollisionFrameId !== null) {
       window.cancelAnimationFrame(labelCollisionFrameId);
     }
+    if (pathwayListRenderFrameId !== null) {
+      window.cancelAnimationFrame(pathwayListRenderFrameId);
+    }
     if (labelCollisionTimerId !== null) {
       window.clearTimeout(labelCollisionTimerId);
-    }
-    if (typeof Plotly?.purge === 'function') {
-      Plotly.purge('plot-container');
     }
     if (typeof cy?.destroy === 'function') {
       cy.destroy();

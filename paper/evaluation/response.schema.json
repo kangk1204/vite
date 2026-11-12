@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PNV evaluation trial responses",
+  "description": "Structural schema only. protocol.mjs additionally checks frozen assignment identity, complete trials, time limits and origin separation.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["participantId", "trialId", "caseId", "condition", "period", "phase", "dataOrigin", "status", "elapsedMs", "confidence", "answer"],
+    "properties": {
+      "participantId": {"type": "string", "minLength": 1},
+      "trialId": {"type": "string", "pattern": "^T(0[1-9]|1[0-2])$"},
+      "caseId": {"type": "string", "minLength": 1},
+      "condition": {"enum": ["pnv_full", "pnv_basic", "genetonic"]},
+      "period": {"type": "integer", "minimum": 1, "maximum": 3},
+      "phase": {"enum": ["pilot", "main", "dry_run"]},
+      "dataOrigin": {"enum": ["human", "synthetic"]},
+      "status": {"enum": ["completed", "timeout", "abandoned", "system_error"]},
+      "elapsedMs": {"type": "number", "minimum": 0},
+      "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+      "answer": {"type": "string"}
+    }
+  }
+}

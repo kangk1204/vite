@@ -1,0 +1,45 @@
+{
+  "cohortKey": "gse159699_ad_replication",
+  "datasetIdentifier": "GSE159699",
+  "projectTitle": "Alzheimer disease lateral temporal lobe versus old control brain",
+  "contrastName": "AD_vs_old_control",
+  "conditionA": "Old control",
+  "conditionB": "Alzheimer disease",
+  "contrastDefinition": "Alzheimer disease lateral temporal lobe bulk RNA-seq versus age-matched old control tissue",
+  "sampleGroupSource": "Parsed from GEO sample titles (`*-Old` controls, `*-AD` Alzheimer disease); `Young` samples are excluded from the manuscript contrast.",
+  "batchHandlingRule": "DESeq2 design = ~ group; no explicit batch or age covariate is available for the AD samples in the series matrix.",
+  "notes": "Neural replication cohort. Uses the AD versus Old-control contrast only; Young controls remain outside the active manuscript comparison.",
+  "rawCountsUrl": "https://www.ncbi.nlm.nih.gov/geo/download/?type=rnaseq_counts&acc=GSE159699&format=file&file=GSE159699_raw_counts_GRCh38.p13_NCBI.tsv.gz",
+  "seriesMatrixUrl": "https://ftp.ncbi.nlm.nih.gov/geo/series/GSE159nnn/GSE159699/matrix/GSE159699_series_matrix.txt.gz",
+  "rawCountsPath": "data/raw/GSE159699_raw_counts_GRCh38.p13_NCBI.tsv.gz",
+  "seriesMatrixPath": "data/raw/GSE159699_series_matrix.txt.gz",
+  "resultPrefix": "gse159699_ad_vs_old_control",
+  "figurePrefix": "gse159699_ad_replication",
+  "designFormula": "~ group",
+  "numericCovariates": [],
+  "groupRules": [
+    {
+      "group": "A",
+      "source": "title_clean",
+      "pattern": "-Old\\b"
+    },
+    {
+      "group": "B",
+      "source": "title_clean",
+      "pattern": "-AD\\b"
+    }
+  ],
+  "filterMinCount": 10,
+  "filterMinFraction": 0.15,
+  "figureTitles": {
+    "pca": "Alzheimer disease and old-control temporal-lobe samples form distinct bulk RNA-seq states",
+    "volcano": "Differential expression in Alzheimer disease temporal lobe versus old control",
+    "pathway": "Reactome pathways altered in Alzheimer disease temporal lobe"
+  },
+  "seed": 20261110,
+  "camera": true,
+  "referencePath": "data/reference/ReactomePathways.gmt.zip",
+  "bootstrapReplicates": 0,
+  "outputDir": "paper/outputs/publication_v2/gse159699_ad_replication",
+  "writeFigures": false
+}

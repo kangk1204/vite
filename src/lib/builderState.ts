@@ -32,7 +32,13 @@ export interface DraftAnalysisState {
   loadedFileName: string;
   sampleFilter: string;
   bulkBatchValue: string;
-  analysisSignature: string;
+  groupCounts: {
+    A: number;
+    B: number;
+    excluded: number;
+  };
+  analysisRevision: number;
+  lastAnalyzedRevision: number;
   isDirtySinceLastRun: boolean;
 }
 
@@ -43,6 +49,7 @@ type DraftAnalysisAction =
   | { type: 'setup_session'; session: DesignSession; loadedFileName: string }
   | { type: 'reset' }
   | { type: 'set_analysis_result'; result: WorkbookParseResult; loadedFileName: string }
+  | { type: 'import_result'; result: WorkbookParseResult; loadedFileName: string }
   | { type: 'set_sample_filter'; value: string }
   | { type: 'set_bulk_batch_value'; value: string }
   | { type: 'set_group_factor'; factorId: string }
@@ -170,21 +177,57 @@ export function createInitialDraftAnalysisState(): DraftAnalysisState {
     loadedFileName: '',
     sampleFilter: '',
     bulkBatchValue: '',
-    analysisSignature: '',
+    groupCounts: { A: 0, B: 0, excluded: 0 },
+    analysisRevision: 0,
+    lastAnalyzedRevision: -1,
     isDirtySinceLastRun: false,
   };
 }
 
-export function computeDesignSignature(session: DesignSession): string {
-  return JSON.stringify({
-    source: session.source,
-    groupFactorId: session.groupFactorId,
-    batchFactorId: session.batchFactorId,
-    conditionA: session.conditionA.trim(),
-    conditionB: session.conditionB.trim(),
-    groups: session.preview.sampleIds.map((sampleId) => [sampleId, session.groupBySample[sampleId] ?? '']),
-    batches: session.preview.sampleIds.map((sampleId) => [sampleId, session.batchBySample[sampleId] ?? '']),
+function countGroups(groupBySample: Record<string, GeoGroupAssignment>): DraftAnalysisState['groupCounts'] {
+  let A = 0;
+  let B = 0;
+  let excluded = 0;
+  Object.values(groupBySample).forEach((group) => {
+    if (group === 'A') {
+      A += 1;
+      return;
+    }
+    if (group === 'B') {
+      B += 1;
+      return;
+    }
+    excluded += 1;
   });
+  return { A, B, excluded };
+}
+
+function applyGroupCountDelta(
+  counts: DraftAnalysisState['groupCounts'],
+  previous: GeoGroupAssignment,
+  next: GeoGroupAssignment,
+): DraftAnalysisState['groupCounts'] {
+  if (previous === next) {
+    return counts;
+  }
+  const updated = { ...counts };
+  if (previous === 'A') {
+    updated.A -= 1;
+  } else if (previous === 'B') {
+    updated.B -= 1;
+  } else {
+    updated.excluded -= 1;
+  }
+
+  if (next === 'A') {
+    updated.A += 1;
+  } else if (next === 'B') {
+    updated.B += 1;
+  } else {
+    updated.excluded += 1;
+  }
+
+  return updated;
 }
 
 function withUpdatedSession(
@@ -192,11 +235,12 @@ function withUpdatedSession(
   nextSession: DesignSession,
   overrides: Partial<DraftAnalysisState> = {},
 ): DraftAnalysisState {
-  const nextSignature = computeDesignSignature(nextSession);
+  const nextRevision = state.analysisRevision + 1;
   return {
     ...state,
     designSession: nextSession,
-    isDirtySinceLastRun: Boolean(state.result && state.analysisSignature && nextSignature !== state.analysisSignature),
+    analysisRevision: nextRevision,
+    isDirtySinceLastRun: Boolean(state.result && nextRevision !== state.lastAnalyzedRevision),
     ...overrides,
   };
 }
@@ -211,15 +255,22 @@ export function draftAnalysisReducer(
         ...createInitialDraftAnalysisState(),
         designSession: action.session,
         loadedFileName: action.loadedFileName,
+        groupCounts: countGroups(action.session.groupBySample),
       };
     case 'reset':
       return createInitialDraftAnalysisState();
+    case 'import_result':
+      return {
+        ...createInitialDraftAnalysisState(),
+        result: action.result,
+        loadedFileName: action.loadedFileName,
+      };
     case 'set_analysis_result':
       return {
         ...state,
         result: action.result,
         loadedFileName: action.loadedFileName,
-        analysisSignature: state.designSession ? computeDesignSignature(state.designSession) : '',
+        lastAnalyzedRevision: state.analysisRevision,
         isDirtySinceLastRun: false,
       };
     case 'set_sample_filter':
@@ -236,9 +287,14 @@ export function draftAnalysisReducer(
       if (!state.designSession) {
         return state;
       }
-      return withUpdatedSession(state, {
+      const updatedSession = {
         ...state.designSession,
         ...applyGroupFactor(state.designSession, action.factorId),
+      };
+      return withUpdatedSession(state, {
+        ...updatedSession,
+      }, {
+        groupCounts: countGroups(updatedSession.groupBySample),
       });
     }
     case 'set_batch_factor': {
@@ -268,12 +324,16 @@ export function draftAnalysisReducer(
       if (!state.designSession) {
         return state;
       }
+      const previous = state.designSession.groupBySample[action.sampleId] ?? '';
+      const nextCounts = applyGroupCountDelta(state.groupCounts, previous, action.value);
       return withUpdatedSession(state, {
         ...state.designSession,
         groupBySample: {
           ...state.designSession.groupBySample,
           [action.sampleId]: action.value,
         },
+      }, {
+        groupCounts: nextCounts,
       });
     }
     case 'update_sample_batch': {
@@ -293,12 +353,17 @@ export function draftAnalysisReducer(
         return state;
       }
       const groupBySample = { ...state.designSession.groupBySample };
+      let nextCounts = state.groupCounts;
       action.sampleIds.forEach((sampleId) => {
+        const previous = groupBySample[sampleId] ?? '';
         groupBySample[sampleId] = action.value;
+        nextCounts = applyGroupCountDelta(nextCounts, previous, action.value);
       });
       return withUpdatedSession(state, {
         ...state.designSession,
         groupBySample,
+      }, {
+        groupCounts: nextCounts,
       });
     }
     case 'assign_filtered_batch': {

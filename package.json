@@ -1,12 +1,31 @@
 {
   "name": "18_pathway_networkviewer",
   "version": "0.1.0",
-  "description": "Offline figure builder for bulk RNA-seq pathway network reports.",
+  "description": "Local RNA-seq analysis and evidence-linked offline pathway reports.",
   "scripts": {
-    "dev": "vite --host",
+    "dev": "vite --host 127.0.0.1",
     "build": "vite build",
+    "typecheck": "tsc --noEmit",
     "build:ref": "python3 scripts/build_reference.py",
-    "test": "vitest run"
+    "search:benchmark": "node --expose-gc --experimental-strip-types scripts/run_search_benchmark.ts",
+    "geo-cache-server": "node scripts/geo_cache_server.mjs",
+    "paper:benchmark": "node scripts/run_paper_benchmark.mjs paper/manifests/publication_v2.json",
+    "paper:benchmark:psoriasis": "node scripts/run_paper_benchmark.mjs paper/manifests/psoriasis_methods_case_study.json",
+    "paper:summary": "node scripts/build_replication_summary.mjs paper/manifests/publication_v2.json",
+    "paper:summary:psoriasis": "node scripts/build_replication_summary.mjs paper/manifests/psoriasis_methods_case_study.json",
+    "test": "vitest run",
+    "analyze:local": "node scripts/run_local_analysis.mjs",
+    "test:r": "node scripts/run_r_tests.mjs",
+    "test:e2e": "node tests/e2e/offline-report.mjs",
+    "study": "node scripts/study/run_study.mjs",
+    "report:build": "node scripts/build_report_from_workbook.mjs",
+    "environment:restore": "Rscript scripts/restore_analysis_env.R",
+    "test:ui": "node tests/e2e/local-input.mjs",
+    "environment:verify": "Rscript scripts/verify_analysis_env.R",
+    "paper:benchmark:legacy-neural": "node scripts/run_paper_benchmark.mjs paper/cohort_manifest.json",
+    "paper:summary:legacy-neural": "node scripts/build_replication_summary.mjs paper/cohort_manifest.json",
+    "paper:finalize": "node scripts/finalize_publication_v2.mjs paper/manifests/publication_v2.json",
+    "paper:ablation": "node scripts/run_cohort_ablation.mjs paper/manifests/publication_v2.json"
   },
   "keywords": [],
   "author": "",
@@ -23,7 +42,7 @@
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "svg2pdf.js": "^2.7.0",
-    "xlsx": "^0.18.5"
+    "xlsx": "file:vendor/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.9.1",

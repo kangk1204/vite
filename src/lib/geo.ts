@@ -1,30 +1,32 @@
-import * as XLSX from 'xlsx';
-import pathwayIndex from '../reference/generated/pathways.json';
-import ncbiGeneMap from '../reference/generated/ncbi_gene_map.json';
-import { lookupCanonicalSymbol } from '../reference';
-import type {
-  ReferencePathway,
-  ReferencePathwayIndex,
-  ValidationIssue,
-  ViewerSampleMeta,
-  WorkbookParseResult,
-} from '../types';
-import { parseWorkbookBuffer } from './workbook';
-import { normalizeSymbolToken } from './utils';
+import type { WorkbookParseResult } from '../types';
 
 const EUTILS_BASE = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils';
 const GEO_BASE = 'https://www.ncbi.nlm.nih.gov';
-const SAMPLE_COLUMN_PREFIX = 'sample_';
-const MIN_PATHWAY_OVERLAP = 3;
-const MAX_PATHWAY_ROWS = 220;
-const SMALL = 1e-12;
-const MAX_GEO_SAMPLES = 1500;
-const MAX_GEO_MATRIX_CELLS = 45_000_000;
-const geneIdToSymbol = ncbiGeneMap as Record<string, string>;
-const referencePathways = Object.values((pathwayIndex as ReferencePathwayIndex).byId);
-
+const MAX_GEO_FILE_BYTES = 128 * 1024 * 1024;
+const GEO_QUERY_CACHE_TTL_MS = 10 * 60 * 1000;
+const GEO_ACCESSION_CACHE_TTL_MS = 30 * 60 * 1000;
+const GEO_QUERY_CACHE_MAX_ENTRIES = 32;
+const GEO_ACCESSION_CACHE_MAX_ENTRIES = 320;
+const GEO_CACHE_PERSIST_DEBOUNCE_MS = 300;
+const GEO_MIN_REQUEST_INTERVAL_MS = 350;
+const GEO_REQUEST_RETRY_MAX_ATTEMPTS = 2;
+const GEO_REQUEST_RETRY_BASE_DELAY_MS = 600;
+const GEO_REQUEST_RETRY_MAX_DELAY_MS = 8_000;
+const GEO_QUERY_CACHE_STORAGE_KEY = 'pnv.geo.query-cache.v2';
+const GEO_ACCESSION_CACHE_STORAGE_KEY = 'pnv.geo.accession-cache.v2';
+const GEO_METADATA_ORGANISM_FILTER = '"Homo sapiens"[Organism]';
+const GEO_METADATA_DATASET_TYPE_FILTER = '"expression profiling by high throughput sequencing"[DataSet Type]';
+const SHARED_GEO_CACHE_ENDPOINT = import.meta.env.VITE_GEO_CACHE_ENDPOINT?.trim().replace(/\/+$/, '') ?? '';
+let geoRequestGate = Promise.resolve();
+let nextGeoRequestStartAt = 0;
+const geoQueryCache = new Map<string, { expiresAt: number; response: GeoSearchResponse }>();
+const geoAccessionCache = new Map<string, { expiresAt: number; result: GeoSearchResult }>();
+let geoQueryCacheLoaded = false;
+let geoAccessionCacheLoaded = false;
+let geoCachePersistTimer: number | null = null;
 interface ESearchResponse {
   esearchresult?: {
+    count?: string;
     idlist?: string[];
   };
 }
@@ -46,6 +48,12 @@ interface ESummaryResponse {
     uids?: string[];
     [uid: string]: ESummaryRecord | string[] | undefined;
   };
+}
+
+interface GeoSearchOptions {
+  signal?: AbortSignal;
+  onProgress?: (response: GeoSearchResponse) => void;
+  initialPageSize?: number;
 }
 
 interface ParsedGroupInfo {
@@ -70,28 +78,9 @@ interface ParsedSeriesMetadata {
   factors: ParsedSeriesFactor[];
 }
 
-interface GeneStat {
-  symbol: string;
-  log2fc: number;
-  rankMetric: number;
-  pvalue: number;
-  padj: number;
-  meanA: number;
-  meanB: number;
-  sampleValues: Record<string, number>;
-}
-
-interface PathwayScore {
-  pathway: ReferencePathway;
-  nes: number;
-  pvalue: number;
-  padj: number;
-  leadingEdge: string[];
-}
-
-interface RawCountParseResult {
-  sampleIds: string[];
-  countsBySymbol: Map<string, Float64Array>;
+interface SeriesSampleAlignment {
+  seriesToRawSampleId: Map<string, string>;
+  unresolvedSeriesSampleIds: string[];
 }
 
 export interface GeoSearchResult {
@@ -110,6 +99,7 @@ export interface GeoSearchResult {
   tpmUrl?: string;
   fpkmUrl?: string;
   annotationUrl?: string;
+  eligibilityStatus: 'checking' | 'eligible' | 'excluded';
   isEligible: boolean;
   eligibilityReason?: string;
 }
@@ -117,8 +107,16 @@ export interface GeoSearchResult {
 export interface GeoSearchResponse {
   results: GeoSearchResult[];
   rawHitCount: number;
+  inspectedCount: number;
+  checkingCount: number;
   eligibleCount: number;
   excludedCount: number;
+  complete: boolean;
+}
+
+export interface GeoSearchSession {
+  initialResponse: GeoSearchResponse;
+  completion: Promise<GeoSearchResponse>;
 }
 
 export interface AnalyzeGeoFromTextOptions {
@@ -173,7 +171,7 @@ function sanitizeText(value: unknown): string {
   return String(value ?? '').trim();
 }
 
-function parseTabLine(line: string): string[] {
+export function parseGeoTabLine(line: string): string[] {
   const fields: string[] = [];
   let current = '';
   let inQuotes = false;
@@ -212,15 +210,471 @@ function stripQuotes(value: string): string {
   return trimmed;
 }
 
-async function fetchJson<T>(url: string): Promise<T> {
-  const response = await fetch(url);
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException
+    ? error.name === 'AbortError'
+    : error instanceof Error && error.name === 'AbortError';
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new DOMException('The operation was aborted.', 'AbortError');
+  }
+}
+
+function canUseStorage(): boolean {
+  if (import.meta.env.MODE === 'test') {
+    return false;
+  }
+  if (typeof navigator !== 'undefined' && /jsdom/i.test(navigator.userAgent)) {
+    return false;
+  }
+  return (
+    typeof window !== 'undefined' &&
+    typeof window.localStorage !== 'undefined' &&
+    typeof window.localStorage.getItem === 'function' &&
+    typeof window.localStorage.setItem === 'function' &&
+    typeof window.localStorage.removeItem === 'function'
+  );
+}
+
+function sleep(ms: number): Promise<void> {
+  if (ms <= 0) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function shouldThrottleGeoRequests(): boolean {
+  return import.meta.env.MODE !== 'test';
+}
+
+async function waitForGeoRequestSlot(signal?: AbortSignal): Promise<void> {
+  if (!shouldThrottleGeoRequests()) {
+    return;
+  }
+  const slot = geoRequestGate;
+  let releaseSlot = () => {};
+  geoRequestGate = new Promise<void>((resolve) => {
+    releaseSlot = resolve;
+  });
+  await slot;
+  throwIfAborted(signal);
+  const now = Date.now();
+  const startAt = Math.max(now, nextGeoRequestStartAt);
+  const waitMs = startAt - now;
+  if (waitMs > 0) {
+    await sleep(waitMs);
+  }
+  nextGeoRequestStartAt = Math.max(now, nextGeoRequestStartAt) + GEO_MIN_REQUEST_INTERVAL_MS;
+  releaseSlot();
+}
+
+function parseRetryAfterHeader(response: Response): number | null {
+  const header = response.headers.get('retry-after');
+  if (!header) {
+    return null;
+  }
+  const seconds = Number.parseInt(header, 10);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return seconds * 1000;
+  }
+  const date = new Date(header).getTime();
+  if (Number.isFinite(date)) {
+    return Math.max(0, date - Date.now());
+  }
+  return null;
+}
+
+function calculateRetryDelayMs(attempt: number, response: Response | null): number {
+  if (response) {
+    const retryAfterMs = parseRetryAfterHeader(response);
+    if (retryAfterMs !== null) {
+      return Math.min(Math.max(retryAfterMs, 0), GEO_REQUEST_RETRY_MAX_DELAY_MS);
+    }
+  }
+  return Math.min(GEO_REQUEST_RETRY_BASE_DELAY_MS * 2 ** attempt, GEO_REQUEST_RETRY_MAX_DELAY_MS);
+}
+
+function formatGeoRequestError(status: number, url: string): string {
+  if (status === 429) {
+    return `HTTP 429 (rate limited) while requesting ${url}. Slow down or use an API key.`;
+  }
+  return `HTTP ${status} while requesting ${url}`;
+}
+
+async function fetchWithRateLimit(url: string, init: RequestInit, signal?: AbortSignal): Promise<Response> {
+  let attempt = 0;
+  while (true) {
+    await waitForGeoRequestSlot(signal);
+    throwIfAborted(signal);
+    try {
+      const response = await fetch(url, init);
+      if (
+        (response.status === 429 || (response.status >= 500 && response.status < 600)) &&
+        attempt < GEO_REQUEST_RETRY_MAX_ATTEMPTS
+      ) {
+        await sleep(calculateRetryDelayMs(attempt, response));
+        attempt += 1;
+        continue;
+      }
+      return response;
+    } catch (error) {
+      if (isAbortError(error) || attempt >= GEO_REQUEST_RETRY_MAX_ATTEMPTS) {
+        throw error;
+      }
+      await sleep(calculateRetryDelayMs(attempt, null));
+      attempt += 1;
+    }
+  }
+}
+
+function cloneGeoSearchResult(result: GeoSearchResult): GeoSearchResult {
+  return { ...result };
+}
+
+function normalizeCachedGeoSearchResult(result: GeoSearchResult): GeoSearchResult {
+  const eligibilityStatus =
+    result.eligibilityStatus ?? (result.isEligible ? 'eligible' : result.eligibilityReason ? 'excluded' : 'checking');
+  return {
+    ...result,
+    eligibilityStatus,
+    isEligible: eligibilityStatus === 'eligible',
+    eligibilityReason:
+      result.eligibilityReason ?? (eligibilityStatus === 'checking' ? 'Checking NCBI-generated raw counts…' : undefined),
+  };
+}
+
+function cloneGeoSearchResponse(response: GeoSearchResponse): GeoSearchResponse {
+  const normalizedResults = response.results.map(normalizeCachedGeoSearchResult);
+  let inspectedCount = 0;
+  let eligibleCount = 0;
+  let excludedCount = 0;
+  normalizedResults.forEach((item) => {
+    if (item.eligibilityStatus !== 'checking') {
+      inspectedCount += 1;
+    }
+    if (item.eligibilityStatus === 'eligible') {
+      eligibleCount += 1;
+      return;
+    }
+    if (item.eligibilityStatus === 'excluded') {
+      excludedCount += 1;
+    }
+  });
+  const checkingCount = normalizedResults.length - inspectedCount;
+  return {
+    ...response,
+    results: normalizedResults.map(cloneGeoSearchResult),
+    inspectedCount,
+    checkingCount,
+    eligibleCount,
+    excludedCount,
+    complete: response.complete !== false,
+  };
+}
+
+function pruneCacheMap<T extends { expiresAt: number }>(cache: Map<string, T>, maxEntries: number): void {
+  const now = Date.now();
+  for (const [key, entry] of cache.entries()) {
+    if (entry.expiresAt <= now) {
+      cache.delete(key);
+    }
+  }
+  while (cache.size > maxEntries) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey === undefined) {
+      break;
+    }
+    cache.delete(oldestKey);
+  }
+}
+
+function touchCacheEntry<T>(cache: Map<string, T>, key: string, entry: T): void {
+  cache.delete(key);
+  cache.set(key, entry);
+}
+
+function loadGeoCaches(): void {
+  if (!canUseStorage()) {
+    geoQueryCacheLoaded = true;
+    geoAccessionCacheLoaded = true;
+    return;
+  }
+  try {
+    if (!geoQueryCacheLoaded) {
+      geoQueryCacheLoaded = true;
+      const rawQueryCache = window.localStorage.getItem(GEO_QUERY_CACHE_STORAGE_KEY);
+      if (rawQueryCache) {
+        const entries = JSON.parse(rawQueryCache) as Array<[string, { expiresAt: number; response: GeoSearchResponse }]>;
+        entries.forEach(([key, entry]) => {
+          if (entry?.expiresAt > Date.now()) {
+            geoQueryCache.set(key, entry);
+          }
+        });
+        pruneCacheMap(geoQueryCache, GEO_QUERY_CACHE_MAX_ENTRIES);
+      }
+    }
+    if (!geoAccessionCacheLoaded) {
+      geoAccessionCacheLoaded = true;
+      const rawAccessionCache = window.localStorage.getItem(GEO_ACCESSION_CACHE_STORAGE_KEY);
+      if (rawAccessionCache) {
+        const entries = JSON.parse(rawAccessionCache) as Array<[string, { expiresAt: number; result: GeoSearchResult }]>;
+        entries.forEach(([key, entry]) => {
+          if (entry?.expiresAt > Date.now()) {
+            geoAccessionCache.set(key, entry);
+          }
+        });
+        pruneCacheMap(geoAccessionCache, GEO_ACCESSION_CACHE_MAX_ENTRIES);
+      }
+    }
+  } catch {
+    // Ignore corrupted persistent cache state.
+  }
+}
+
+function persistGeoCachesNow(): void {
+  if (!canUseStorage()) {
+    return;
+  }
+  try {
+    pruneCacheMap(geoQueryCache, GEO_QUERY_CACHE_MAX_ENTRIES);
+    pruneCacheMap(geoAccessionCache, GEO_ACCESSION_CACHE_MAX_ENTRIES);
+    window.localStorage.setItem(
+      GEO_QUERY_CACHE_STORAGE_KEY,
+      JSON.stringify(Array.from(geoQueryCache.entries())),
+    );
+    window.localStorage.setItem(
+      GEO_ACCESSION_CACHE_STORAGE_KEY,
+      JSON.stringify(Array.from(geoAccessionCache.entries())),
+    );
+  } catch {
+    // Ignore storage quota failures.
+  }
+}
+
+function schedulePersistGeoCaches(): void {
+  if (!canUseStorage()) {
+    return;
+  }
+  if (geoCachePersistTimer !== null) {
+    return;
+  }
+  if (typeof window === 'undefined' || typeof window.setTimeout !== 'function') {
+    persistGeoCachesNow();
+    return;
+  }
+  geoCachePersistTimer = window.setTimeout(() => {
+    geoCachePersistTimer = null;
+    persistGeoCachesNow();
+  }, GEO_CACHE_PERSIST_DEBOUNCE_MS);
+}
+
+function cancelScheduledGeoCachePersist(): void {
+  if (geoCachePersistTimer === null) {
+    return;
+  }
+  if (typeof window !== 'undefined' && typeof window.clearTimeout === 'function') {
+    window.clearTimeout(geoCachePersistTimer);
+  }
+  geoCachePersistTimer = null;
+}
+
+function canUseSharedGeoCache(): boolean {
+  return Boolean(SHARED_GEO_CACHE_ENDPOINT);
+}
+
+async function fetchSharedGeoCacheJson<T>(
+  path: string,
+  init: RequestInit = {},
+  signal?: AbortSignal,
+): Promise<T | null> {
+  if (!canUseSharedGeoCache()) {
+    return null;
+  }
+  try {
+    throwIfAborted(signal);
+    const response = await fetch(`${SHARED_GEO_CACHE_ENDPOINT}${path}`, {
+      ...init,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(init.headers ?? {}),
+      },
+      signal,
+    });
+    if (response.status === 404) {
+      return null;
+    }
+    if (!response.ok) {
+      return null;
+    }
+    return (await response.json()) as T;
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
+    return null;
+  }
+}
+
+async function getSharedGeoQuery(queryKey: string, signal?: AbortSignal): Promise<GeoSearchResponse | null> {
+  const payload = await fetchSharedGeoCacheJson<{ response?: GeoSearchResponse }>(
+    `/api/geo-cache/query?key=${encodeURIComponent(queryKey)}`,
+    {},
+    signal,
+  );
+  return payload?.response ? cloneGeoSearchResponse(payload.response) : null;
+}
+
+async function setSharedGeoQuery(queryKey: string, response: GeoSearchResponse): Promise<void> {
+  await fetchSharedGeoCacheJson(
+    `/api/geo-cache/query?key=${encodeURIComponent(queryKey)}`,
+    {
+      method: 'PUT',
+      body: JSON.stringify({ response }),
+    },
+  );
+}
+
+async function getSharedGeoAccessionBatch(
+  accessions: string[],
+  signal?: AbortSignal,
+): Promise<Record<string, GeoSearchResult>> {
+  if (!accessions.length) {
+    return {};
+  }
+  const payload = await fetchSharedGeoCacheJson<{ items?: Record<string, GeoSearchResult> }>(
+    '/api/geo-cache/accessions/lookup',
+    {
+      method: 'POST',
+      body: JSON.stringify({ accessions }),
+    },
+    signal,
+  );
+  if (!payload?.items) {
+    return {};
+  }
+  return Object.fromEntries(
+    Object.entries(payload.items).map(([accession, result]) => [accession, normalizeCachedGeoSearchResult(result)]),
+  );
+}
+
+async function setSharedGeoAccession(result: GeoSearchResult): Promise<void> {
+  await fetchSharedGeoCacheJson(
+    `/api/geo-cache/accession?key=${encodeURIComponent(result.accession)}`,
+    {
+      method: 'PUT',
+      body: JSON.stringify({ result }),
+    },
+  );
+}
+
+function getCachedGeoQuery(queryKey: string): GeoSearchResponse | null {
+  loadGeoCaches();
+  const entry = geoQueryCache.get(queryKey);
+  if (!entry) {
+    return null;
+  }
+  if (entry.expiresAt <= Date.now()) {
+    geoQueryCache.delete(queryKey);
+    schedulePersistGeoCaches();
+    return null;
+  }
+  touchCacheEntry(geoQueryCache, queryKey, entry);
+  return cloneGeoSearchResponse(entry.response);
+}
+
+function setCachedGeoQuery(queryKey: string, response: GeoSearchResponse): void {
+  loadGeoCaches();
+  geoQueryCache.set(queryKey, {
+    expiresAt: Date.now() + GEO_QUERY_CACHE_TTL_MS,
+    response: cloneGeoSearchResponse(response),
+  });
+  pruneCacheMap(geoQueryCache, GEO_QUERY_CACHE_MAX_ENTRIES);
+  schedulePersistGeoCaches();
+}
+
+function getCachedGeoAccession(accession: string): GeoSearchResult | null {
+  loadGeoCaches();
+  const entry = geoAccessionCache.get(accession);
+  if (!entry) {
+    return null;
+  }
+  if (entry.expiresAt <= Date.now()) {
+    geoAccessionCache.delete(accession);
+    schedulePersistGeoCaches();
+    return null;
+  }
+  touchCacheEntry(geoAccessionCache, accession, entry);
+  return cloneGeoSearchResult(entry.result);
+}
+
+function setCachedGeoAccession(result: GeoSearchResult): void {
+  loadGeoCaches();
+  geoAccessionCache.set(result.accession, {
+    expiresAt: Date.now() + GEO_ACCESSION_CACHE_TTL_MS,
+    result: cloneGeoSearchResult(result),
+  });
+  pruneCacheMap(geoAccessionCache, GEO_ACCESSION_CACHE_MAX_ENTRIES);
+  schedulePersistGeoCaches();
+}
+
+export function __resetGeoSearchCachesForTests(): void {
+  cancelScheduledGeoCachePersist();
+  geoQueryCache.clear();
+  geoAccessionCache.clear();
+  geoQueryCacheLoaded = false;
+  geoAccessionCacheLoaded = false;
+  if (canUseStorage()) {
+    window.localStorage.removeItem(GEO_QUERY_CACHE_STORAGE_KEY);
+    window.localStorage.removeItem(GEO_ACCESSION_CACHE_STORAGE_KEY);
+  }
+}
+
+export function __getGeoSearchCacheSizesForTests(): { queryEntries: number; accessionEntries: number } {
+  return {
+    queryEntries: geoQueryCache.size,
+    accessionEntries: geoAccessionCache.size,
+  };
+}
+
+async function fetchJson<T>(url: string, signal?: AbortSignal): Promise<T> {
+  const response = await fetchWithRateLimit(url, { signal }, signal);
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status} while requesting ${url}`);
+    throw new Error(formatGeoRequestError(response.status, url));
   }
   return (await response.json()) as T;
 }
 
+async function readBoundedStream(stream: ReadableStream<Uint8Array>): Promise<Uint8Array<ArrayBuffer>> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_GEO_FILE_BYTES) {
+        await reader.cancel();
+        throw new Error('Input exceeds the 128 MiB browser memory limit. Use the local R workflow directly.');
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
 async function maybeGunzip(bytes: Uint8Array): Promise<string> {
+  if (bytes.byteLength > MAX_GEO_FILE_BYTES) throw new Error('Input exceeds the 128 MiB browser memory limit.');
   if (bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b) {
     if (typeof DecompressionStream === 'undefined') {
       throw new Error(
@@ -232,23 +686,30 @@ async function maybeGunzip(bytes: Uint8Array): Promise<string> {
         ? bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
         : Uint8Array.from(bytes).buffer;
     const stream = new Blob([byteBuffer]).stream().pipeThrough(new DecompressionStream('gzip'));
-    return new Response(stream).text();
+    return new TextDecoder().decode(await readBoundedStream(stream));
   }
   return new TextDecoder().decode(bytes);
 }
 
-async function fetchTextMaybeGzip(url: string, label: string): Promise<string> {
+async function fetchTextMaybeGzip(url: string, label: string, signal?: AbortSignal): Promise<string> {
   try {
-    const response = await fetch(url);
+    const response = await fetchWithRateLimit(url, { signal }, signal);
     if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
+      throw new Error(formatGeoRequestError(response.status, url));
     }
-    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (Number(response.headers.get('content-length')) > MAX_GEO_FILE_BYTES) {
+      await response.body?.cancel();
+      throw new Error('Download exceeds the 128 MiB browser memory limit. Use the local R workflow directly.');
+    }
+    const bytes = response.body ? await readBoundedStream(response.body) : new Uint8Array(await response.arrayBuffer());
     return maybeGunzip(bytes);
   } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
     if (error instanceof TypeError) {
       throw new Error(
-        `Failed to download ${label}. Browser CORS blocked access to ${url}. Download the files manually and use "Analyze from files".`,
+        `Failed to download ${label}. Browser CORS blocked access to ${url}. Download the files manually and use private file upload.`,
       );
     }
     throw error;
@@ -256,6 +717,7 @@ async function fetchTextMaybeGzip(url: string, label: string): Promise<string> {
 }
 
 async function readTextMaybeGzipFromFile(file: File): Promise<string> {
+  if (file.size > MAX_GEO_FILE_BYTES) throw new Error('Input file exceeds the 128 MiB browser memory limit. Use the local R workflow directly.');
   const bytes = new Uint8Array(await file.arrayBuffer());
   if (/\.gz$/i.test(file.name) || (bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b)) {
     return maybeGunzip(bytes);
@@ -292,6 +754,20 @@ function safeDecodeURIComponent(value: string): string {
   } catch {
     return value;
   }
+}
+
+function extractDownloadFilenameFromHref(href: string): string {
+  const fileMatch = href.match(/[?&]file=([^&]+)/i);
+  if (fileMatch?.[1]) {
+    return safeDecodeURIComponent(fileMatch[1]);
+  }
+
+  const path = href.split(/[?#]/, 1)[0];
+  const lastSegment = path.split('/').filter(Boolean).pop();
+  if (!lastSegment) {
+    return '';
+  }
+  return safeDecodeURIComponent(lastSegment);
 }
 
 type DownloadLinks = Pick<
@@ -334,11 +810,11 @@ function classifyRnaSeqFile(filename: string): 'raw_counts' | 'tpm' | 'fpkm' | '
 function firstMatchByHeuristic(
   candidates: Array<{ filename: string; url: string }>,
   key: 'raw_counts' | 'tpm' | 'fpkm' | 'annot',
-): string | undefined {
+): { filename: string; url: string } | undefined {
   for (const candidate of candidates) {
     const classified = classifyRnaSeqFile(candidate.filename);
     if (classified === key) {
-      return candidate.url;
+      return candidate;
     }
   }
   return undefined;
@@ -358,33 +834,27 @@ export function parseGeoDownloadLinksFromHtml(html: string): DownloadLinks {
       seriesMatrixUrl = href;
     }
 
-    if (!/type=rnaseq_counts/i.test(href) || !/format=file/i.test(href) || !/[?&]file=/i.test(href)) {
-      continue;
-    }
-    const filenameMatch = href.match(/[?&]file=([^&]+)/i);
-    const filename = filenameMatch?.[1] ? safeDecodeURIComponent(filenameMatch[1]) : '';
-    if (!filename) {
+    const filename = extractDownloadFilenameFromHref(href);
+    const classification = classifyRnaSeqFile(filename);
+    if (!classification) {
       continue;
     }
     rnaseqCandidates.push({ filename, url: href });
   }
 
-  const rawCountsUrl = firstMatchByHeuristic(rnaseqCandidates, 'raw_counts');
-  const tpmUrl = firstMatchByHeuristic(rnaseqCandidates, 'tpm');
-  const fpkmUrl = firstMatchByHeuristic(rnaseqCandidates, 'fpkm');
-  const annotationUrl = firstMatchByHeuristic(rnaseqCandidates, 'annot');
-  const rawCountsFilename = rawCountsUrl
-    ? safeDecodeURIComponent(rawCountsUrl.match(/[?&]file=([^&]+)/i)?.[1] ?? '')
-    : undefined;
+  const rawCountsMatch = firstMatchByHeuristic(rnaseqCandidates, 'raw_counts');
+  const tpmMatch = firstMatchByHeuristic(rnaseqCandidates, 'tpm');
+  const fpkmMatch = firstMatchByHeuristic(rnaseqCandidates, 'fpkm');
+  const annotationMatch = firstMatchByHeuristic(rnaseqCandidates, 'annot');
 
   return {
-    hasNcbiGeneratedRawCounts: Boolean(rawCountsUrl),
-    rawCountsUrl,
-    rawCountsFilename,
+    hasNcbiGeneratedRawCounts: Boolean(rawCountsMatch),
+    rawCountsUrl: rawCountsMatch?.url,
+    rawCountsFilename: rawCountsMatch?.filename,
     seriesMatrixUrl,
-    tpmUrl,
-    fpkmUrl,
-    annotationUrl,
+    tpmUrl: tpmMatch?.url,
+    fpkmUrl: fpkmMatch?.url,
+    annotationUrl: annotationMatch?.url,
   };
 }
 
@@ -396,141 +866,375 @@ function simplifySummary(summary: string): string {
   return `${compact.slice(0, 237).trimEnd()}...`;
 }
 
-function formatSeriesMatrixUrl(ftplink: string | undefined, accession: string): string | undefined {
-  const ftp = sanitizeText(ftplink);
-  if (!ftp) {
-    return undefined;
-  }
-  const normalized = normalizeGeoHref(`${ftp.replace(/\/+$/, '')}/matrix/${accession}_series_matrix.txt.gz`);
-  return normalized || undefined;
+function parseSearchCount(value: string | undefined, fallback: number): number {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
-async function enrichSearchResult(base: GeoSearchResult): Promise<GeoSearchResult> {
-  try {
-    const downloadHtml = await fetchTextMaybeGzip(`${base.downloadUrl}&format=text`, `download page (${base.accession})`);
-    const links = parseGeoDownloadLinksFromHtml(downloadHtml);
-    const enriched = {
-      ...base,
-      ...links,
-      seriesMatrixUrl: links.seriesMatrixUrl ?? base.seriesMatrixUrl,
-    };
-    return finalizeGeoSearchResult(enriched);
-  } catch {
-    return finalizeGeoSearchResult(base);
-  }
+function buildGeoSearchTerm(query: string): string {
+  const baseTerm = /^GSE\d+$/i.test(query) ? `${query}[ACCN]` : `(${query})`;
+  return [
+    baseTerm,
+    'gse[ETYP]',
+    GEO_METADATA_ORGANISM_FILTER,
+    GEO_METADATA_DATASET_TYPE_FILTER,
+  ].join(' AND ');
 }
 
-function getGeoEligibilityReason(result: GeoSearchResult): string | undefined {
+function getGeoImmediateExclusionReason(result: GeoSearchResult): string | undefined {
   if (!/homo sapiens|human/i.test(result.organism)) {
     return 'Excluded: non-human study';
   }
-  if (!result.hasNcbiGeneratedRawCounts) {
-    return 'Excluded: NCBI-generated raw counts unavailable';
-  }
-  if (!result.seriesMatrixUrl) {
-    return 'Excluded: series matrix metadata unavailable';
-  }
   return undefined;
+}
+
+function getGeoEligibilityReason(result: GeoSearchResult): string | undefined {
+  return (
+    getGeoImmediateExclusionReason(result) ??
+    (!result.seriesMatrixUrl ? 'Excluded: series matrix metadata unavailable' : undefined) ??
+    (!result.hasNcbiGeneratedRawCounts ? 'Excluded: NCBI-generated raw counts unavailable' : undefined)
+  );
 }
 
 function finalizeGeoSearchResult(result: GeoSearchResult): GeoSearchResult {
   const eligibilityReason = getGeoEligibilityReason(result);
   return {
     ...result,
+    eligibilityStatus: eligibilityReason ? 'excluded' : 'eligible',
     isEligible: !eligibilityReason,
     eligibilityReason,
   };
 }
 
-export async function searchGeoDatasets(query: string, limit = 8): Promise<GeoSearchResponse> {
-  const normalized = query.trim();
-  if (!normalized) {
+function createCheckingGeoSearchResult(base: GeoSearchResult): GeoSearchResult {
+  return {
+    ...base,
+    eligibilityStatus: 'checking',
+    isEligible: false,
+    eligibilityReason: 'Checking NCBI-generated raw counts…',
+  };
+}
+
+function compareGeoResults(left: GeoSearchResult, right: GeoSearchResult): number {
+  const rankByStatus = { eligible: 2, checking: 1, excluded: 0 } as const;
+  return (
+    rankByStatus[right.eligibilityStatus] - rankByStatus[left.eligibilityStatus] ||
+    Number(right.hasNcbiGeneratedRawCounts) - Number(left.hasNcbiGeneratedRawCounts) ||
+    right.sampleCount - left.sampleCount
+  );
+}
+
+function buildGeoSearchResponse(results: GeoSearchResult[], rawHitCount: number, complete: boolean): GeoSearchResponse {
+  const sortedResults = results.slice().sort(compareGeoResults);
+  let inspectedCount = 0;
+  let checkingCount = 0;
+  let eligibleCount = 0;
+  let excludedCount = 0;
+  for (const item of sortedResults) {
+    if (item.eligibilityStatus === 'checking') {
+      checkingCount += 1;
+      continue;
+    }
+    inspectedCount += 1;
+    if (item.eligibilityStatus === 'eligible') {
+      eligibleCount += 1;
+      continue;
+    }
+    excludedCount += 1;
+  }
+  return {
+    results: sortedResults,
+    rawHitCount,
+    inspectedCount,
+    checkingCount,
+    eligibleCount,
+    excludedCount,
+    complete,
+  };
+}
+
+function buildGeoBaseResult(entry: ESummaryRecord): GeoSearchResult | null {
+  const accession = sanitizeText(entry.accession);
+  if (!/^GSE\d+$/i.test(accession)) {
+    return null;
+  }
+  return {
+    accession,
+    title: sanitizeText(entry.title) || accession,
+    summary: simplifySummary(sanitizeText(entry.summary)),
+    organism: sanitizeText(entry.taxon) || 'Unknown',
+    sampleCount: Number(entry.n_samples ?? 0),
+    pubmedId: entry.pubmedids?.[0],
+    geoUrl: `${GEO_BASE}/geo/query/acc.cgi?acc=${encodeURIComponent(accession)}`,
+    downloadUrl: `${GEO_BASE}/geo/download/?acc=${encodeURIComponent(accession)}`,
+    hasNcbiGeneratedRawCounts: false,
+    rawCountsUrl: undefined,
+    rawCountsFilename: undefined,
+    seriesMatrixUrl: undefined,
+    tpmUrl: undefined,
+    fpkmUrl: undefined,
+    annotationUrl: undefined,
+    eligibilityStatus: 'checking',
+    isEligible: false,
+    eligibilityReason: undefined,
+  };
+}
+
+function applyKnownGeoStatus(result: GeoSearchResult): GeoSearchResult {
+  const cached = getCachedGeoAccession(result.accession);
+  if (cached) {
     return {
-      results: [],
-      rawHitCount: 0,
-      eligibleCount: 0,
-      excludedCount: 0,
+      ...result,
+      ...cached,
+      seriesMatrixUrl: cached.seriesMatrixUrl ?? result.seriesMatrixUrl,
     };
   }
+  const preExcludedReason = getGeoImmediateExclusionReason(result);
+  if (preExcludedReason) {
+    return {
+      ...result,
+      eligibilityStatus: 'excluded',
+      isEligible: false,
+      eligibilityReason: preExcludedReason,
+    };
+  }
+  return createCheckingGeoSearchResult(result);
+}
 
-  const term = /^GSE\d+$/i.test(normalized)
-    ? `${normalized}[ACCN] AND gse[ETYP]`
-    : `${normalized} AND gse[ETYP]`;
+async function enrichSearchResult(base: GeoSearchResult, signal?: AbortSignal): Promise<GeoSearchResult> {
+  const cached = getCachedGeoAccession(base.accession);
+  if (cached) {
+    return {
+      ...base,
+      ...cached,
+      seriesMatrixUrl: cached.seriesMatrixUrl ?? base.seriesMatrixUrl,
+    };
+  }
+  try {
+    const downloadHtml = await fetchTextMaybeGzip(
+      `${base.downloadUrl}&format=text`,
+      `download page (${base.accession})`,
+      signal,
+    );
+    const links = parseGeoDownloadLinksFromHtml(downloadHtml);
+    const finalized = finalizeGeoSearchResult({
+      ...base,
+      ...links,
+      seriesMatrixUrl: links.seriesMatrixUrl ?? base.seriesMatrixUrl,
+    });
+    setCachedGeoAccession(finalized);
+    void setSharedGeoAccession(finalized);
+    return finalized;
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
+    const finalized = finalizeGeoSearchResult(base);
+    setCachedGeoAccession(finalized);
+    void setSharedGeoAccession(finalized);
+    return finalized;
+  }
+}
 
-  const retmax = Math.max(limit * 8, 40);
-  const esearchUrl = `${EUTILS_BASE}/esearch.fcgi?db=gds&retmode=json&retmax=${retmax}&term=${encodeURIComponent(term)}`;
-  const searchPayload = await fetchJson<ESearchResponse>(esearchUrl);
-  const ids = searchPayload.esearchresult?.idlist?.filter(Boolean) ?? [];
+async function fetchGeoSummaryPage(
+  term: string,
+  retstart: number,
+  retmax: number,
+  seenAccessions: Set<string>,
+  signal?: AbortSignal,
+): Promise<{ rawHitCount: number; nextRetstart: number; results: GeoSearchResult[] }> {
+  const esearchUrl = `${EUTILS_BASE}/esearch.fcgi?db=gds&retmode=json&retmax=${retmax}&retstart=${retstart}&term=${encodeURIComponent(term)}`;
+  const searchPayload = await fetchJson<ESearchResponse>(esearchUrl, signal);
+  const searchResult = searchPayload.esearchresult;
+  const ids = searchResult?.idlist?.filter(Boolean) ?? [];
+  const rawHitCount = parseSearchCount(searchResult?.count, retstart + ids.length);
   if (!ids.length) {
     return {
+      rawHitCount,
+      nextRetstart: retstart,
       results: [],
-      rawHitCount: 0,
-      eligibleCount: 0,
-      excludedCount: 0,
     };
   }
 
   const esummaryUrl = `${EUTILS_BASE}/esummary.fcgi?db=gds&retmode=json&id=${encodeURIComponent(ids.join(','))}`;
-  const summaryPayload = await fetchJson<ESummaryResponse>(esummaryUrl);
+  const summaryPayload = await fetchJson<ESummaryResponse>(esummaryUrl, signal);
   const uidList = summaryPayload.result?.uids ?? [];
-  const baseResults: GeoSearchResult[] = [];
-
+  const results: GeoSearchResult[] = [];
   for (const uid of uidList) {
     const entry = summaryPayload.result?.[uid];
     if (!entry || Array.isArray(entry)) {
       continue;
     }
-    const accession = sanitizeText(entry.accession);
-    if (!/^GSE\d+$/i.test(accession)) {
+    const baseResult = buildGeoBaseResult(entry);
+    if (!baseResult || seenAccessions.has(baseResult.accession)) {
       continue;
     }
-
-    const base: GeoSearchResult = {
-      accession,
-      title: sanitizeText(entry.title) || accession,
-      summary: simplifySummary(sanitizeText(entry.summary)),
-      organism: sanitizeText(entry.taxon) || 'Unknown',
-      sampleCount: Number(entry.n_samples ?? 0),
-      pubmedId: entry.pubmedids?.[0],
-      geoUrl: `${GEO_BASE}/geo/query/acc.cgi?acc=${encodeURIComponent(accession)}`,
-      downloadUrl: `${GEO_BASE}/geo/download/?acc=${encodeURIComponent(accession)}`,
-      hasNcbiGeneratedRawCounts: false,
-      rawCountsUrl: undefined,
-      rawCountsFilename: undefined,
-      seriesMatrixUrl: formatSeriesMatrixUrl(entry.ftplink, accession),
-      isEligible: false,
-      eligibilityReason: undefined,
-    };
-
-    baseResults.push(base);
+    seenAccessions.add(baseResult.accession);
+    results.push(baseResult);
   }
+  return {
+    rawHitCount,
+    nextRetstart: retstart + ids.length,
+    results,
+  };
+}
 
-  const inspectedResults: GeoSearchResult[] = [];
-  let eligibleCount = 0;
-  const batchSize = 6;
-
-  for (let index = 0; index < baseResults.length; index += batchSize) {
-    const batch = await Promise.all(baseResults.slice(index, index + batchSize).map((item) => enrichSearchResult(item)));
-    inspectedResults.push(...batch);
-    eligibleCount += batch.filter((item) => item.isEligible).length;
-    if (eligibleCount >= limit) {
-      break;
-    }
-  }
-
-  inspectedResults.sort(
-    (left, right) =>
-      Number(right.isEligible) - Number(left.isEligible) ||
-      Number(right.hasNcbiGeneratedRawCounts) - Number(left.hasNcbiGeneratedRawCounts) ||
-      right.sampleCount - left.sampleCount,
+async function hydrateGeoResults(
+  pendingResults: GeoSearchResult[],
+  existingResults: GeoSearchResult[],
+  rawHitCount: number,
+  onProgress: ((response: GeoSearchResponse) => void) | undefined,
+  signal?: AbortSignal,
+): Promise<GeoSearchResult[]> {
+  const nextResults = existingResults.slice();
+  const sharedCachedResults = await getSharedGeoAccessionBatch(
+    pendingResults.map((item) => item.accession),
+    signal,
   );
+  const remainingResults = pendingResults.filter((item) => {
+    const sharedCached = sharedCachedResults[item.accession];
+    if (!sharedCached) {
+      return true;
+    }
+    const existingIndex = nextResults.findIndex((candidate) => candidate.accession === item.accession);
+    const merged = {
+      ...item,
+      ...sharedCached,
+      seriesMatrixUrl: sharedCached.seriesMatrixUrl ?? item.seriesMatrixUrl,
+    };
+    setCachedGeoAccession(merged);
+    if (existingIndex >= 0) {
+      nextResults[existingIndex] = merged;
+    } else {
+      nextResults.push(merged);
+    }
+    return false;
+  });
+  if (remainingResults.length !== pendingResults.length) {
+    onProgress?.(buildGeoSearchResponse(nextResults, rawHitCount, false));
+  }
+  const batchSize = 6;
+  for (let index = 0; index < remainingResults.length; index += batchSize) {
+    throwIfAborted(signal);
+    const batch = await Promise.all(
+      remainingResults.slice(index, index + batchSize).map((item) => enrichSearchResult(item, signal)),
+    );
+    batch.forEach((resolvedItem) => {
+      const existingIndex = nextResults.findIndex((item) => item.accession === resolvedItem.accession);
+      if (existingIndex >= 0) {
+        nextResults[existingIndex] = resolvedItem;
+      } else {
+        nextResults.push(resolvedItem);
+      }
+    });
+    onProgress?.(buildGeoSearchResponse(nextResults, rawHitCount, false));
+  }
+  return nextResults;
+}
+
+export async function startGeoDatasetSearch(
+  query: string,
+  limit = 8,
+  options: GeoSearchOptions = {},
+): Promise<GeoSearchSession> {
+  const normalized = query.trim();
+  if (!normalized) {
+    const empty: GeoSearchResponse = {
+      results: [],
+      rawHitCount: 0,
+      inspectedCount: 0,
+      checkingCount: 0,
+      eligibleCount: 0,
+      excludedCount: 0,
+      complete: true,
+    };
+    return {
+      initialResponse: empty,
+      completion: Promise.resolve(empty),
+    };
+  }
+
+  const queryKey = normalized.toLowerCase();
+  const cachedResponse = getCachedGeoQuery(queryKey);
+  if (cachedResponse) {
+    return {
+      initialResponse: cachedResponse,
+      completion: Promise.resolve(cachedResponse),
+    };
+  }
+  const sharedCachedResponse = await getSharedGeoQuery(queryKey, options.signal);
+  if (sharedCachedResponse) {
+    setCachedGeoQuery(queryKey, sharedCachedResponse);
+    return {
+      initialResponse: sharedCachedResponse,
+      completion: Promise.resolve(sharedCachedResponse),
+    };
+  }
+
+  const term = buildGeoSearchTerm(normalized);
+  const initialPageSize = Math.max(options.initialPageSize ?? limit, 12);
+  const backgroundPageSize = Math.max(limit, 18);
+  const seenAccessions = new Set<string>();
+
+  const initialPage = await fetchGeoSummaryPage(term, 0, initialPageSize, seenAccessions, options.signal);
+  const initialResults = initialPage.results.map(applyKnownGeoStatus);
+  const initialResponse = buildGeoSearchResponse(initialResults, initialPage.rawHitCount, false);
+
+  const completion = (async () => {
+    let currentResults = initialResults.slice();
+    let currentRawHitCount = initialPage.rawHitCount;
+    currentResults = await hydrateGeoResults(
+      currentResults.filter((item) => item.eligibilityStatus === 'checking'),
+      currentResults,
+      currentRawHitCount,
+      options.onProgress,
+      options.signal,
+    );
+
+    let nextRetstart = initialPage.nextRetstart;
+    while (currentResults.filter((item) => item.eligibilityStatus === 'eligible').length < limit) {
+      throwIfAborted(options.signal);
+      if (nextRetstart >= currentRawHitCount) {
+        break;
+      }
+      const page = await fetchGeoSummaryPage(term, nextRetstart, backgroundPageSize, seenAccessions, options.signal);
+      nextRetstart = page.nextRetstart;
+      currentRawHitCount = Math.max(currentRawHitCount, page.rawHitCount);
+      if (!page.results.length) {
+        break;
+      }
+      const pageResults = page.results.map(applyKnownGeoStatus);
+      currentResults = currentResults.concat(pageResults);
+      options.onProgress?.(buildGeoSearchResponse(currentResults, currentRawHitCount, false));
+      currentResults = await hydrateGeoResults(
+        pageResults.filter((item) => item.eligibilityStatus === 'checking'),
+        currentResults,
+        currentRawHitCount,
+        options.onProgress,
+        options.signal,
+      );
+    }
+
+    const finalResponse = buildGeoSearchResponse(currentResults, currentRawHitCount, true);
+    setCachedGeoQuery(queryKey, finalResponse);
+    void setSharedGeoQuery(queryKey, finalResponse);
+    options.onProgress?.(finalResponse);
+    return finalResponse;
+  })();
 
   return {
-    results: inspectedResults,
-    rawHitCount: baseResults.length,
-    eligibleCount: inspectedResults.filter((item) => item.isEligible).length,
-    excludedCount: inspectedResults.filter((item) => !item.isEligible).length,
+    initialResponse,
+    completion,
   };
+}
+
+export async function searchGeoDatasets(
+  query: string,
+  limit = 8,
+  options: GeoSearchOptions = {},
+): Promise<GeoSearchResponse> {
+  const session = await startGeoDatasetSearch(query, limit, options);
+  return session.completion;
 }
 
 function parseCharacteristic(value: string): { key: string; parsedValue: string } {
@@ -604,8 +1308,11 @@ function chooseBinaryFactor(sampleIds: string[], factors: Map<string, string[]>)
     }
 
     const [conditionA, conditionB] = orderConditions(unique[0], unique[1]);
+    const explicitContrastFactor = /(?:^|[: _-])(group|condition|disease|diagnosis|phenotype|genotype|treatment)(?:$|[ _-])/i.test(factorName);
+    const explicitContrastLabels = isControlLike(conditionA) && isCaseLike(conditionB);
+    if (!explicitContrastFactor && !explicitContrastLabels) continue;
     let score = minCount * 10;
-    if (/(genotype|variation|disease|condition|status|group|phenotype)/i.test(factorName)) {
+    if (explicitContrastFactor) {
       score += 25;
     }
     if (/(title|source)/i.test(factorName)) {
@@ -721,7 +1428,7 @@ function parseSeriesMatrix(text: string): ParsedSeriesMetadata {
     if (!rawLine.startsWith('!Sample_')) {
       continue;
     }
-    const fields = parseTabLine(rawLine);
+    const fields = parseGeoTabLine(rawLine);
     if (fields.length < 2) {
       continue;
     }
@@ -737,6 +1444,9 @@ function parseSeriesMatrix(text: string): ParsedSeriesMetadata {
   const sampleIds = sampleColumns.get('geo_accession')?.map(normalizeCategory) ?? [];
   if (!sampleIds.length) {
     throw new Error('Series matrix file is missing !Sample_geo_accession entries.');
+  }
+  if (sampleIds.some((id) => !id) || new Set(sampleIds).size !== sampleIds.length) {
+    throw new Error('Series metadata contains empty or duplicate sample IDs.');
   }
 
   const factors = new Map<string, string[]>();
@@ -761,12 +1471,9 @@ function parseSeriesMatrix(text: string): ParsedSeriesMetadata {
     );
   });
 
-  const inferredGroups = chooseBinaryFactor(sampleIds, factors);
-  if (!inferredGroups) {
-    throw new Error(
-      'Could not infer a binary comparison from series metadata. Please provide series matrix with clear 2-group sample annotations.',
-    );
-  }
+  const inferredGroups = chooseBinaryFactor(sampleIds, factors) ?? {
+    factorName: 'manual', conditionA: 'Condition A', conditionB: 'Condition B', groupBySample: {},
+  };
 
   if (titles?.length === sampleIds.length) {
     for (let index = 0; index < sampleIds.length; index += 1) {
@@ -793,71 +1500,88 @@ function parseSeriesMatrix(text: string): ParsedSeriesMetadata {
   return { sampleIds, sampleTitles, inferredGroups, factors: parsedFactors };
 }
 
-function resolveGeneSymbol(identifier: string): string | null {
-  const token = stripQuotes(identifier);
-  if (!token) {
-    return null;
+function normalizeSampleMatchKey(value: string): string {
+  const trimmed = stripQuotes(value).trim();
+  if (!trimmed) {
+    return '';
   }
-  const normalized = normalizeSymbolToken(token);
-  const noVersion = normalized.replace(/\.\d+$/g, '');
-  const mapped = geneIdToSymbol[noVersion] ?? geneIdToSymbol[normalized];
-  const canonical = mapped ? lookupCanonicalSymbol(mapped) : lookupCanonicalSymbol(noVersion);
-  return canonical ?? mapped ?? null;
+  const withoutCommonSuffix = trimmed
+    .replace(/\.(?:fastq|fq|bam|sam|txt|tsv|csv)(?:\.gz)?$/i, '')
+    .replace(/\.(?:counts|count)$/i, '');
+  return withoutCommonSuffix.toLowerCase().replace(/[^a-z0-9]+/g, '');
 }
 
-function parseRawCountsMatrix(rawCountsText: string): RawCountParseResult {
-  const lines = rawCountsText
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  if (lines.length < 2) {
-    throw new Error('Raw counts file is empty or malformed.');
-  }
-
-  const header = parseTabLine(lines[0]).map(stripQuotes);
-  if (header.length < 3) {
-    throw new Error('Raw counts header must include GeneID and at least two samples.');
-  }
-
-  const sampleIds = header.slice(1).map(normalizeCategory);
-  if (sampleIds.length > MAX_GEO_SAMPLES) {
-    throw new Error(
-      `Dataset has ${sampleIds.length.toLocaleString()} samples. Browser-side analysis is capped around ${MAX_GEO_SAMPLES.toLocaleString()} samples. Please run DESeq2 on a high-memory workstation/server and import the result workbook.`,
-    );
-  }
-  const estimatedCells = sampleIds.length * Math.max(lines.length - 1, 0);
-  if (estimatedCells > MAX_GEO_MATRIX_CELLS) {
-    throw new Error(
-      `Raw count matrix is too large for browser memory (${estimatedCells.toLocaleString()} cells). Use a high-memory environment for DESeq2 (for example R on workstation/HPC) and then load the workbook output here.`,
-    );
-  }
-  const countsBySymbol = new Map<string, Float64Array>();
-
-  for (let rowIndex = 1; rowIndex < lines.length; rowIndex += 1) {
-    const fields = parseTabLine(lines[rowIndex]);
-    if (fields.length < sampleIds.length + 1) {
+function buildCandidateIndex(
+  values: string[],
+  keyOf: (value: string) => string,
+): Map<string, string[]> {
+  const index = new Map<string, string[]>();
+  for (const value of values) {
+    const key = keyOf(value);
+    if (!key) {
       continue;
     }
-    const symbol = resolveGeneSymbol(fields[0]);
-    if (!symbol) {
+    const current = index.get(key);
+    if (current) {
+      current.push(value);
       continue;
     }
+    index.set(key, [value]);
+  }
+  return index;
+}
 
-    const counts = countsBySymbol.get(symbol) ?? new Float64Array(sampleIds.length);
-    for (let sampleIndex = 0; sampleIndex < sampleIds.length; sampleIndex += 1) {
-      const value = Number(fields[sampleIndex + 1]);
-      if (Number.isFinite(value)) {
-        counts[sampleIndex] += Math.max(0, value);
-      }
+function pickUniqueUnusedCandidate(candidates: string[] | undefined, usedRawSampleIds: Set<string>): string | undefined {
+  if (!candidates?.length) {
+    return undefined;
+  }
+  let resolved: string | undefined;
+  for (const candidate of candidates) {
+    if (usedRawSampleIds.has(candidate)) {
+      continue;
     }
-    countsBySymbol.set(symbol, counts);
+    if (resolved && resolved !== candidate) {
+      return undefined;
+    }
+    resolved = candidate;
   }
+  return resolved;
+}
 
-  if (!countsBySymbol.size) {
-    throw new Error('No mappable genes were found in raw counts.');
-  }
+function alignSeriesSamplesToRawSamples(
+  seriesMetadata: ParsedSeriesMetadata,
+  rawSampleIds: string[],
+): SeriesSampleAlignment {
+  const exactKey = (value: string) => normalizeCategory(value).toUpperCase();
+  const exactIndex = buildCandidateIndex(rawSampleIds, exactKey);
+  const normalizedIndex = buildCandidateIndex(rawSampleIds, normalizeSampleMatchKey);
+  const usedRawSampleIds = new Set<string>();
+  const seriesToRawSampleId = new Map<string, string>();
 
-  return { sampleIds, countsBySymbol };
+  // Resolve one priority level globally before considering weaker evidence.
+  // Conflicting proposals remain unresolved instead of depending on metadata order.
+  const assignUniqueMatches = (index: Map<string, string[]>, keyOf: (sampleId: string) => string) => {
+    const proposals = new Map<string, string[]>();
+    for (const sampleId of seriesMetadata.sampleIds) {
+      if (seriesToRawSampleId.has(sampleId)) continue;
+      const candidate = pickUniqueUnusedCandidate(index.get(keyOf(sampleId)), usedRawSampleIds);
+      if (candidate) proposals.set(candidate, [...(proposals.get(candidate) ?? []), sampleId]);
+    }
+    for (const [rawSampleId, owners] of proposals) {
+      if (owners.length !== 1) continue;
+      seriesToRawSampleId.set(owners[0], rawSampleId);
+      usedRawSampleIds.add(rawSampleId);
+    }
+  };
+
+  assignUniqueMatches(exactIndex, exactKey);
+  assignUniqueMatches(normalizedIndex, normalizeSampleMatchKey);
+  assignUniqueMatches(exactIndex, (sampleId) => exactKey(seriesMetadata.sampleTitles[sampleId] ?? ''));
+  assignUniqueMatches(normalizedIndex, (sampleId) => normalizeSampleMatchKey(seriesMetadata.sampleTitles[sampleId] ?? ''));
+  return {
+    seriesToRawSampleId,
+    unresolvedSeriesSampleIds: seriesMetadata.sampleIds.filter((sampleId) => !seriesToRawSampleId.has(sampleId)),
+  };
 }
 
 function buildSeriesDesignPreview(seriesMetadata: ParsedSeriesMetadata): GeoSeriesDesignPreview {
@@ -891,82 +1615,6 @@ function buildSeriesDesignPreview(seriesMetadata: ParsedSeriesMetadata): GeoSeri
   };
 }
 
-function trimDesignLabel(value: string | undefined, fallback: string): string {
-  const cleaned = sanitizeText(value);
-  return cleaned || fallback;
-}
-
-function applyGroupDesign(
-  seriesMetadata: ParsedSeriesMetadata,
-  design: GeoAnalysisDesign | undefined,
-): ParsedGroupInfo {
-  const conditionA = trimDesignLabel(design?.conditionA, seriesMetadata.inferredGroups.conditionA);
-  const conditionB = trimDesignLabel(design?.conditionB, seriesMetadata.inferredGroups.conditionB);
-  if (conditionA === conditionB) {
-    throw new Error('Condition A and condition B must be different labels.');
-  }
-
-  const groupBySample: Record<string, 'A' | 'B'> = {};
-  let groupACount = 0;
-  let groupBCount = 0;
-  for (const sampleId of seriesMetadata.sampleIds) {
-    const requestedGroup = design?.groupBySample?.[sampleId];
-    const inferredGroup = seriesMetadata.inferredGroups.groupBySample[sampleId];
-    const group = requestedGroup === 'A' || requestedGroup === 'B' ? requestedGroup : inferredGroup;
-    if (group === 'A') {
-      groupACount += 1;
-      groupBySample[sampleId] = 'A';
-    } else if (group === 'B') {
-      groupBCount += 1;
-      groupBySample[sampleId] = 'B';
-    }
-  }
-
-  if (groupACount < 2 || groupBCount < 2) {
-    throw new Error(
-      `Assigned groups are too small after setup (A=${groupACount}, B=${groupBCount}). Set at least 2 samples per group.`,
-    );
-  }
-
-  return {
-    factorName: trimDesignLabel(design?.groupFactorName, seriesMetadata.inferredGroups.factorName),
-    conditionA,
-    conditionB,
-    groupBySample,
-  };
-}
-
-function applyBatchDesign(
-  sampleIds: string[],
-  groupInfo: ParsedGroupInfo,
-  design: GeoAnalysisDesign | undefined,
-): { batchBySample: Record<string, string>; batchFactorName?: string } | null {
-  if (!design?.batchBySample) {
-    return null;
-  }
-
-  const batchBySample: Record<string, string> = {};
-  for (const sampleId of sampleIds) {
-    const group = groupInfo.groupBySample[sampleId];
-    if (!group) {
-      continue;
-    }
-    const rawValue = design.batchBySample[sampleId];
-    const value = sanitizeText(rawValue) || 'Batch_1';
-    batchBySample[sampleId] = value;
-  }
-
-  const uniqueBatches = Array.from(new Set(Object.values(batchBySample)));
-  if (uniqueBatches.length < 2) {
-    return null;
-  }
-
-  return {
-    batchBySample,
-    batchFactorName: sanitizeText(design.batchFactorName) || undefined,
-  };
-}
-
 export function previewGeoSeriesDesignFromText(seriesMatrixText: string): GeoSeriesDesignPreview {
   const metadata = parseSeriesMatrix(seriesMatrixText);
   return buildSeriesDesignPreview(metadata);
@@ -977,692 +1625,80 @@ export async function previewGeoSeriesDesignFromFile(seriesMatrixFile: File): Pr
   return previewGeoSeriesDesignFromText(seriesMatrixText);
 }
 
-export async function previewGeoSeriesDesignFromNcbi(dataset: GeoSearchResult): Promise<GeoSeriesDesignPreview> {
-  const seriesMatrixUrl =
-    dataset.seriesMatrixUrl ??
-    normalizeGeoHref(
-      `https://ftp.ncbi.nlm.nih.gov/geo/series/${dataset.accession.slice(0, -3)}nnn/${dataset.accession}/matrix/${dataset.accession}_series_matrix.txt.gz`,
-    );
-  const seriesMatrixText = await fetchTextMaybeGzip(
-    seriesMatrixUrl,
-    `Series matrix metadata (${dataset.accession})`,
+async function resolveSeriesMatrixTextFromNcbi(dataset: GeoSearchResult): Promise<string> {
+  const candidateUrls: string[] = [];
+  if (dataset.seriesMatrixUrl) {
+    candidateUrls.push(normalizeGeoHref(dataset.seriesMatrixUrl));
+  }
+
+  let firstError: Error | null = null;
+  for (const url of candidateUrls) {
+    try {
+      return await fetchTextMaybeGzip(url, `Series matrix metadata (${dataset.accession})`);
+    } catch (error) {
+      if (!firstError && error instanceof Error) {
+        firstError = error;
+      }
+    }
+  }
+
+  const downloadHtml = await fetchTextMaybeGzip(
+    `${dataset.downloadUrl}&format=text`,
+    `download page (${dataset.accession})`,
   );
+  const parsedLinks = parseGeoDownloadLinksFromHtml(downloadHtml);
+  const resolvedSeriesMatrixUrl = parsedLinks.seriesMatrixUrl ? normalizeGeoHref(parsedLinks.seriesMatrixUrl) : '';
+  if (resolvedSeriesMatrixUrl && !candidateUrls.includes(resolvedSeriesMatrixUrl)) {
+    return fetchTextMaybeGzip(resolvedSeriesMatrixUrl, `Series matrix metadata (${dataset.accession})`);
+  }
+
+  if (firstError) {
+    throw firstError;
+  }
+  throw new Error(
+    `Series matrix metadata is unavailable for ${dataset.accession}. Choose a dataset with an exposed series matrix file or use private file upload.`,
+  );
+}
+
+export async function previewGeoSeriesDesignFromNcbi(dataset: GeoSearchResult): Promise<GeoSeriesDesignPreview> {
+  const seriesMatrixText = await resolveSeriesMatrixTextFromNcbi(dataset);
   return previewGeoSeriesDesignFromText(seriesMatrixText);
 }
 
-function mean(values: number[]): number {
-  if (!values.length) {
-    return 0;
-  }
-  return values.reduce((acc, value) => acc + value, 0) / values.length;
+/** Compatibility boundary: inference is performed exclusively by the local R engine. */
+export async function analyzeGeoDatasetFromText(_options: AnalyzeGeoFromTextOptions): Promise<WorkbookParseResult> {
+  throw new Error('Browser inference has been removed. Prepare an input bundle and run local R analysis with npm run analyze:local.');
 }
 
-function variance(values: number[], valuesMean: number): number {
-  if (values.length <= 1) {
-    return 0;
-  }
-  const sumSquares = values.reduce((acc, value) => acc + (value - valuesMean) ** 2, 0);
-  return sumSquares / (values.length - 1);
+export async function analyzeGeoDatasetFromFiles(_options: AnalyzeGeoFromFilesOptions): Promise<WorkbookParseResult> {
+  throw new Error('Browser inference has been removed. Prepare an input bundle and run local R analysis with npm run analyze:local.');
 }
 
-function erf(x: number): number {
-  const sign = x < 0 ? -1 : 1;
-  const absX = Math.abs(x);
-  const a1 = 0.254829592;
-  const a2 = -0.284496736;
-  const a3 = 1.421413741;
-  const a4 = -1.453152027;
-  const a5 = 1.061405429;
-  const p = 0.3275911;
-  const t = 1 / (1 + p * absX);
-  const y = 1 - (((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * Math.exp(-absX * absX));
-  return sign * y;
+export async function analyzeGeoDatasetFromNcbi(_dataset: GeoSearchResult, _design?: GeoAnalysisDesign): Promise<WorkbookParseResult> {
+  throw new Error('Browser inference has been removed. Prepare an input bundle and run local R analysis with npm run analyze:local.');
 }
 
-function normalCdf(value: number): number {
-  return 0.5 * (1 + erf(value / Math.SQRT2));
+export function alignGeoInputSamples(seriesMatrixText: string, rawSampleIds: string[]): SeriesSampleAlignment {
+  return alignSeriesSamplesToRawSamples(parseSeriesMatrix(seriesMatrixText), rawSampleIds);
 }
 
-function benjaminiHochberg(values: number[]): number[] {
-  const indexed = values.map((value, index) => ({ value: Number.isFinite(value) ? value : 1, index }));
-  indexed.sort((left, right) => left.value - right.value);
-
-  const adjusted = new Array(values.length).fill(1);
-  let prev = 1;
-  for (let rank = indexed.length; rank >= 1; rank -= 1) {
-    const entry = indexed[rank - 1];
-    const candidate = Math.min(prev, (entry.value * indexed.length) / rank);
-    prev = candidate;
-    adjusted[entry.index] = Math.max(0, Math.min(1, candidate));
-  }
-  return adjusted;
-}
-
-function toSafeContrastToken(value: string): string {
-  return value
-    .trim()
-    .replace(/[^\p{L}\p{N}]+/gu, '_')
-    .replace(/^_+|_+$/g, '')
-    .slice(0, 40) || 'Condition';
-}
-
-interface BuildGeneStatsResult {
-  stats: GeneStat[];
-  batchApplied: boolean;
-  batchLevelCount: number;
-  batchSkippedReason?: string;
-}
-
-function invertMatrix(matrix: number[][]): number[][] | null {
-  const n = matrix.length;
-  if (!n || matrix.some((row) => row.length !== n)) {
-    return null;
-  }
-
-  const augmented: number[][] = matrix.map((row, rowIndex) => [
-    ...row.map((value) => (Number.isFinite(value) ? value : 0)),
-    ...new Array(n).fill(0).map((_, colIndex) => (rowIndex === colIndex ? 1 : 0)),
+export async function loadGeoInputFromFiles(options: AnalyzeGeoFromFilesOptions): Promise<AnalyzeGeoFromTextOptions> {
+  const [rawCountsText, seriesMatrixText] = await Promise.all([
+    readTextMaybeGzipFromFile(options.rawCountsFile),
+    readTextMaybeGzipFromFile(options.seriesMatrixFile),
   ]);
-
-  for (let pivot = 0; pivot < n; pivot += 1) {
-    let maxRow = pivot;
-    let maxValue = Math.abs(augmented[pivot][pivot]);
-    for (let row = pivot + 1; row < n; row += 1) {
-      const candidate = Math.abs(augmented[row][pivot]);
-      if (candidate > maxValue) {
-        maxValue = candidate;
-        maxRow = row;
-      }
-    }
-
-    if (maxValue <= SMALL) {
-      return null;
-    }
-
-    if (maxRow !== pivot) {
-      const tmp = augmented[pivot];
-      augmented[pivot] = augmented[maxRow];
-      augmented[maxRow] = tmp;
-    }
-
-    const pivotValue = augmented[pivot][pivot];
-    for (let col = 0; col < n * 2; col += 1) {
-      augmented[pivot][col] /= pivotValue;
-    }
-
-    for (let row = 0; row < n; row += 1) {
-      if (row === pivot) {
-        continue;
-      }
-      const factor = augmented[row][pivot];
-      if (Math.abs(factor) <= SMALL) {
-        continue;
-      }
-      for (let col = 0; col < n * 2; col += 1) {
-        augmented[row][col] -= factor * augmented[pivot][col];
-      }
-    }
-  }
-
-  return augmented.map((row) => row.slice(n));
+  return { accession: options.accession, title: options.title, organism: options.organism,
+    design: options.design, rawCountsText, seriesMatrixText };
 }
 
-function multiplyMatrixVector(matrix: number[][], vector: number[]): number[] {
-  return matrix.map((row) => row.reduce((acc, value, index) => acc + value * (vector[index] ?? 0), 0));
-}
-
-function computeLinearModelStat(
-  expression: number[],
-  groups: Array<'A' | 'B'>,
-  batches: string[],
-): { effect: number; tStat: number; pvalue: number; appliedBatch: boolean; skippedReason?: string } {
-  const batchLevels = Array.from(new Set(batches));
-  if (batchLevels.length < 2) {
-    return {
-      effect: 0,
-      tStat: 0,
-      pvalue: 1,
-      appliedBatch: false,
-      skippedReason: 'Batch had <2 levels.',
-    };
-  }
-
-  const batchReference = batchLevels[0];
-  const p = 2 + (batchLevels.length - 1);
-  if (expression.length <= p) {
-    return {
-      effect: 0,
-      tStat: 0,
-      pvalue: 1,
-      appliedBatch: false,
-      skippedReason: `Not enough samples for batch-adjusted model (n=${expression.length}, p=${p}).`,
-    };
-  }
-
-  const x: number[][] = expression.map((_, sampleIndex) => {
-    const row = [1, groups[sampleIndex] === 'B' ? 1 : 0];
-    for (let batchIndex = 1; batchIndex < batchLevels.length; batchIndex += 1) {
-      row.push(batches[sampleIndex] === batchLevels[batchIndex] ? 1 : 0);
-    }
-    return row;
-  });
-
-  const xtx: number[][] = Array.from({ length: p }, () => new Array(p).fill(0));
-  const xty: number[] = new Array(p).fill(0);
-  for (let row = 0; row < expression.length; row += 1) {
-    for (let i = 0; i < p; i += 1) {
-      xty[i] += x[row][i] * expression[row];
-      for (let j = 0; j < p; j += 1) {
-        xtx[i][j] += x[row][i] * x[row][j];
-      }
-    }
-  }
-
-  const invXtx = invertMatrix(xtx);
-  if (!invXtx) {
-    return {
-      effect: 0,
-      tStat: 0,
-      pvalue: 1,
-      appliedBatch: false,
-      skippedReason: 'Batch and group covariates were collinear.',
-    };
-  }
-
-  const beta = multiplyMatrixVector(invXtx, xty);
-  const fitted = x.map((row) => row.reduce((acc, value, index) => acc + value * (beta[index] ?? 0), 0));
-  let rss = 0;
-  for (let row = 0; row < expression.length; row += 1) {
-    rss += (expression[row] - fitted[row]) ** 2;
-  }
-  const df = expression.length - p;
-  if (df <= 0) {
-    return {
-      effect: 0,
-      tStat: 0,
-      pvalue: 1,
-      appliedBatch: false,
-      skippedReason: 'No residual degrees of freedom after batch adjustment.',
-    };
-  }
-
-  const sigma2 = rss / df;
-  const groupVariance = invXtx[1]?.[1] ?? 0;
-  const standardError = Math.sqrt(Math.max(sigma2 * groupVariance, 0));
-  if (!Number.isFinite(standardError) || standardError <= SMALL) {
-    return {
-      effect: beta[1] ?? 0,
-      tStat: 0,
-      pvalue: 1,
-      appliedBatch: false,
-      skippedReason: 'Group effect standard error collapsed after batch adjustment.',
-    };
-  }
-
-  const tStat = (beta[1] ?? 0) / standardError;
-  const pvalue = Math.max(SMALL, Math.min(1, 2 * (1 - normalCdf(Math.abs(tStat)))));
-  return {
-    effect: beta[1] ?? 0,
-    tStat,
-    pvalue,
-    appliedBatch: true,
-  };
-}
-
-function buildGeneStats(
-  parsedCounts: RawCountParseResult,
-  groupInfo: ParsedGroupInfo,
-  batchBySample?: Record<string, string>,
-): BuildGeneStatsResult {
-  const sampleIndexById = new Map(parsedCounts.sampleIds.map((id, index) => [id, index]));
-  const groupAIndices: number[] = [];
-  const groupBIndices: number[] = [];
-  const includedSampleIds: string[] = [];
-  const includedSampleIndices: number[] = [];
-  const includedGroups: Array<'A' | 'B'> = [];
-  const includedBatches: string[] = [];
-
-  for (const sampleId of parsedCounts.sampleIds) {
-    const group = groupInfo.groupBySample[sampleId];
-    const sampleIndex = sampleIndexById.get(sampleId);
-    if (!group || sampleIndex === undefined) {
-      continue;
-    }
-    includedSampleIds.push(sampleId);
-    includedSampleIndices.push(sampleIndex);
-    includedGroups.push(group);
-    includedBatches.push(sanitizeText(batchBySample?.[sampleId]) || 'Batch_1');
-    if (group === 'A') {
-      groupAIndices.push(sampleIndex);
-    } else {
-      groupBIndices.push(sampleIndex);
-    }
-  }
-
-  if (groupAIndices.length < 2 || groupBIndices.length < 2) {
-    throw new Error(
-      `Detected groups are too small (A=${groupAIndices.length}, B=${groupBIndices.length}). Need at least 2 samples per group.`,
-    );
-  }
-
-  const librarySizes = new Float64Array(parsedCounts.sampleIds.length);
-  for (const counts of parsedCounts.countsBySymbol.values()) {
-    for (let sampleIndex = 0; sampleIndex < counts.length; sampleIndex += 1) {
-      librarySizes[sampleIndex] += counts[sampleIndex];
-    }
-  }
-  for (let sampleIndex = 0; sampleIndex < librarySizes.length; sampleIndex += 1) {
-    if (librarySizes[sampleIndex] <= 0) {
-      librarySizes[sampleIndex] = 1;
-    }
-  }
-
-  const stats: GeneStat[] = [];
-  const pvalues: number[] = [];
-  const batchLevels = Array.from(new Set(includedBatches));
-  const batchRequested = Boolean(batchBySample && Object.keys(batchBySample).length);
-  const canAttemptBatch = batchRequested && batchLevels.length >= 2;
-  let batchAppliedCount = 0;
-  let batchSkippedReason: string | undefined;
-
-  for (const [symbol, counts] of parsedCounts.countsBySymbol.entries()) {
-    const maxCount = Math.max(...Array.from(counts));
-    if (!Number.isFinite(maxCount) || maxCount < 8) {
-      continue;
-    }
-
-    const expression = parsedCounts.sampleIds.map((_, sampleIndex) =>
-      Math.log2((counts[sampleIndex] / librarySizes[sampleIndex]) * 1_000_000 + 1),
-    );
-    const groupAValues = groupAIndices.map((sampleIndex) => expression[sampleIndex]);
-    const groupBValues = groupBIndices.map((sampleIndex) => expression[sampleIndex]);
-
-    const meanA = mean(groupAValues);
-    const meanB = mean(groupBValues);
-    const varA = variance(groupAValues, meanA);
-    const varB = variance(groupBValues, meanB);
-    const denominator = Math.sqrt(varA / groupAValues.length + varB / groupBValues.length);
-    let effect = meanB - meanA;
-    let tStat = denominator > SMALL ? effect / denominator : 0;
-    let pvalue = Math.max(SMALL, Math.min(1, 2 * (1 - normalCdf(Math.abs(tStat)))));
-    if (canAttemptBatch) {
-      const includedExpression = includedSampleIndices.map((sampleIndex) => expression[sampleIndex]);
-      const batchModel = computeLinearModelStat(includedExpression, includedGroups, includedBatches);
-      if (batchModel.appliedBatch) {
-        effect = batchModel.effect;
-        tStat = batchModel.tStat;
-        pvalue = batchModel.pvalue;
-        batchAppliedCount += 1;
-      } else if (!batchSkippedReason && batchModel.skippedReason) {
-        batchSkippedReason = batchModel.skippedReason;
-      }
-    } else if (batchRequested && !batchSkippedReason) {
-      batchSkippedReason = 'Batch covariate had only one level after group assignment.';
-    }
-
-    const sampleValues: Record<string, number> = {};
-    for (let localIndex = 0; localIndex < includedSampleIndices.length; localIndex += 1) {
-      const sampleIndex = includedSampleIndices[localIndex];
-      const sampleId = includedSampleIds[localIndex];
-      sampleValues[`${SAMPLE_COLUMN_PREFIX}${sampleId}`] = Number(
-        expression[sampleIndex].toFixed(4),
-      );
-    }
-
-    stats.push({
-      symbol,
-      log2fc: Number(effect.toFixed(6)),
-      rankMetric: Number(tStat.toFixed(6)),
-      pvalue,
-      padj: 1,
-      meanA: Number(meanA.toFixed(6)),
-      meanB: Number(meanB.toFixed(6)),
-      sampleValues,
-    });
-    pvalues.push(pvalue);
-  }
-
-  const padj = benjaminiHochberg(pvalues);
-  for (let index = 0; index < stats.length; index += 1) {
-    stats[index].padj = padj[index];
-  }
-
-  return {
-    stats: stats.sort((left, right) => right.rankMetric - left.rankMetric || left.symbol.localeCompare(right.symbol)),
-    batchApplied: canAttemptBatch && batchAppliedCount > 0,
-    batchLevelCount: canAttemptBatch ? batchLevels.length : 0,
-    batchSkippedReason: canAttemptBatch && batchAppliedCount === 0 ? batchSkippedReason : undefined,
-  };
-}
-
-function scorePathways(geneStats: GeneStat[]): PathwayScore[] {
-  const rankByGene = new Map(geneStats.map((gene) => [gene.symbol, gene.rankMetric]));
-  const rankValues = geneStats.map((gene) => gene.rankMetric);
-  const rankMean = mean(rankValues);
-  const rankVariance = variance(rankValues, rankMean);
-  const rankSd = Math.sqrt(rankVariance || 1);
-
-  const pathways: PathwayScore[] = [];
-  const pathwayPvalues: number[] = [];
-
-  for (const pathway of referencePathways) {
-    const overlap: Array<{ gene: string; metric: number }> = [];
-    for (const gene of pathway.genes) {
-      const metric = rankByGene.get(gene);
-      if (metric !== undefined && Number.isFinite(metric)) {
-        overlap.push({ gene, metric });
-      }
-    }
-
-    if (overlap.length < MIN_PATHWAY_OVERLAP) {
-      continue;
-    }
-
-    const overlapMean = mean(overlap.map((entry) => entry.metric));
-    const nes = (Math.sqrt(overlap.length) * overlapMean) / Math.max(rankSd, SMALL);
-    const pvalue = Math.max(SMALL, Math.min(1, 2 * (1 - normalCdf(Math.abs(nes)))));
-    const sortedOverlap = overlap.sort((left, right) =>
-      nes >= 0 ? right.metric - left.metric : left.metric - right.metric,
-    );
-    const leadingEdge = sortedOverlap.slice(0, Math.min(25, sortedOverlap.length)).map((entry) => entry.gene);
-
-    pathways.push({ pathway, nes, pvalue, padj: 1, leadingEdge });
-    pathwayPvalues.push(pvalue);
-  }
-
-  const pathwayPadj = benjaminiHochberg(pathwayPvalues);
-  for (let index = 0; index < pathways.length; index += 1) {
-    pathways[index].padj = pathwayPadj[index];
-  }
-
-  const sorted = pathways.sort((left, right) => left.padj - right.padj || Math.abs(right.nes) - Math.abs(left.nes));
-  if (sorted.length) {
-    return sorted.slice(0, MAX_PATHWAY_ROWS);
-  }
-
-  const topUp = geneStats.slice(0, 40).map((gene) => gene.symbol);
-  const topDown = [...geneStats].reverse().slice(0, 40).map((gene) => gene.symbol);
-  const fallback: PathwayScore[] = [];
-  if (topUp.length >= 6) {
-    fallback.push({
-      pathway: {
-        id: 'AutoDerived::UP',
-        name: 'AutoDerived Upregulated Signature',
-        collection: 'AutoDerived',
-        genes: topUp,
-      },
-      nes: 2.5,
-      pvalue: 0.0001,
-      padj: 0.0002,
-      leadingEdge: topUp.slice(0, 25),
-    });
-  }
-  if (topDown.length >= 6) {
-    fallback.push({
-      pathway: {
-        id: 'AutoDerived::DOWN',
-        name: 'AutoDerived Downregulated Signature',
-        collection: 'AutoDerived',
-        genes: topDown,
-      },
-      nes: -2.5,
-      pvalue: 0.0001,
-      padj: 0.0002,
-      leadingEdge: topDown.slice(0, 25),
-    });
-  }
-  return fallback;
-}
-
-function buildWorkbookBufferFromGeo(
-  accession: string,
-  title: string,
-  organism: string,
-  groupInfo: ParsedGroupInfo,
-  geneStats: GeneStat[],
-  pathwayScores: PathwayScore[],
-): ArrayBuffer {
-  const projectTitle = `${accession} ${title}`.trim();
-  const workbook = XLSX.utils.book_new();
-
-  XLSX.utils.book_append_sheet(
-    workbook,
-    XLSX.utils.json_to_sheet([
-      {
-        project_title: projectTitle,
-        contrast_name: `${toSafeContrastToken(groupInfo.conditionB)}_vs_${toSafeContrastToken(groupInfo.conditionA)}`,
-        condition_a: groupInfo.conditionA,
-        condition_b: groupInfo.conditionB,
-        species: /human/i.test(organism) ? 'human' : organism || 'human',
-      },
-    ]),
-    'Project',
-  );
-
-  const genesRows = geneStats.map((gene) => ({
-    gene_symbol: gene.symbol,
-    log2fc: gene.log2fc,
-    padj: gene.padj,
-    pvalue: gene.pvalue,
-    rank_metric: gene.rankMetric,
-    condition_a_mean: gene.meanA,
-    condition_b_mean: gene.meanB,
-    ...gene.sampleValues,
-  }));
-  XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(genesRows), 'Genes');
-
-  const pathwaysRows = pathwayScores.map((pathwayScore) => ({
-    pathway_id: pathwayScore.pathway.id.split('::').at(-1) ?? pathwayScore.pathway.id,
-    pathway_name: pathwayScore.pathway.name,
-    collection: pathwayScore.pathway.collection,
-    nes: pathwayScore.nes,
-    padj: pathwayScore.padj,
-    leading_edge_genes: pathwayScore.leadingEdge.join(';'),
-  }));
-  XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(pathwaysRows), 'Pathways');
-
-  return XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
-}
-
-function appendGeoIssues(result: WorkbookParseResult, issues: ValidationIssue[]): WorkbookParseResult {
-  const mergedIssues = [...issues, ...result.issues];
-  const output: WorkbookParseResult = {
-    ...result,
-    issues: mergedIssues,
-  };
-  if (output.viewerData) {
-    output.viewerData = {
-      ...output.viewerData,
-      issues: mergedIssues,
-    };
-  }
-  return output;
-}
-
-function buildViewerSampleMetadata(
-  seriesMetadata: ParsedSeriesMetadata,
-  groupInfo: ParsedGroupInfo,
-  batchDesign: { batchBySample: Record<string, string>; batchFactorName?: string } | null,
-): Record<string, ViewerSampleMeta> {
-  const samplesById: Record<string, ViewerSampleMeta> = {};
-
-  seriesMetadata.sampleIds.forEach((sampleId) => {
-    const sampleKey = `${SAMPLE_COLUMN_PREFIX}${sampleId}`;
-    const groupKey = groupInfo.groupBySample[sampleId] ?? 'U';
-    samplesById[sampleKey] = {
-      id: sampleKey,
-      label: seriesMetadata.sampleTitles[sampleId] || sampleId,
-      groupKey,
-      groupLabel:
-        groupKey === 'A'
-          ? groupInfo.conditionA
-          : groupKey === 'B'
-            ? groupInfo.conditionB
-            : 'Unassigned',
-      batch: batchDesign?.batchBySample[sampleId] || undefined,
-    };
-  });
-
-  return samplesById;
-}
-
-function appendViewerSampleMetadata(
-  result: WorkbookParseResult,
-  samplesById: Record<string, ViewerSampleMeta>,
-): WorkbookParseResult {
-  if (!result.viewerData || !Object.keys(samplesById).length) {
-    return result;
-  }
-
-  return {
-    ...result,
-    viewerData: {
-      ...result.viewerData,
-      samplesById: {
-        ...(result.viewerData.samplesById ?? {}),
-        ...samplesById,
-      },
-    },
-  };
-}
-
-export function analyzeGeoDatasetFromText(options: AnalyzeGeoFromTextOptions): WorkbookParseResult {
-  try {
-    const accession = sanitizeText(options.accession) || 'GSE_AUTO';
-    const title = sanitizeText(options.title) || 'GEO auto-analysis';
-    const organism = sanitizeText(options.organism) || 'human';
-
-    const seriesMetadata = parseSeriesMatrix(options.seriesMatrixText);
-    const groupInfo = applyGroupDesign(seriesMetadata, options.design);
-    const batchDesign = applyBatchDesign(seriesMetadata.sampleIds, groupInfo, options.design);
-    const parsedCounts = parseRawCountsMatrix(options.rawCountsText);
-
-    const missingSamples = seriesMetadata.sampleIds.filter((sampleId) => !parsedCounts.sampleIds.includes(sampleId));
-    if (missingSamples.length) {
-      throw new Error(
-        `Raw counts matrix is missing ${missingSamples.length} sample(s) from series metadata (first: ${missingSamples[0]}).`,
-      );
-    }
-
-    const geneStatsResult = buildGeneStats(parsedCounts, groupInfo, batchDesign?.batchBySample);
-    const geneStats = geneStatsResult.stats;
-    if (!geneStats.length) {
-      throw new Error('No genes passed expression filters for differential analysis.');
-    }
-
-    const pathwayScores = scorePathways(geneStats);
-    if (!pathwayScores.length) {
-      throw new Error('No pathways were scored. Verify that the dataset is human RNA-seq with mappable gene IDs.');
-    }
-
-    const workbookBuffer = buildWorkbookBufferFromGeo(
-      accession,
-      title,
-      organism,
-      groupInfo,
-      geneStats,
-      pathwayScores,
-    );
-    const parsedWorkbook = appendViewerSampleMetadata(
-      parseWorkbookBuffer(workbookBuffer),
-      buildViewerSampleMetadata(seriesMetadata, groupInfo, batchDesign),
-    );
-
-    const infoIssues: ValidationIssue[] = [
-      {
-        level: 'info',
-        message:
-          'GEO auto-analysis uses browser-side approximations (logCPM + Welch/linear-model statistics + pathway z-score ranking).',
-        context: 'GEO Auto',
-      },
-      {
-        level: 'info',
-        message: `Comparison from "${groupInfo.factorName}": ${groupInfo.conditionB} vs ${groupInfo.conditionA}.`,
-        context: 'GEO Auto',
-      },
-    ];
-
-    if (batchDesign) {
-      if (geneStatsResult.batchApplied) {
-        infoIssues.push({
-          level: 'info',
-          message: `Batch-aware linear model was applied (${geneStatsResult.batchLevelCount} batch levels${
-            batchDesign.batchFactorName ? ` from "${batchDesign.batchFactorName}"` : ''
-          }).`,
-          context: 'GEO Auto',
-        });
-      } else if (geneStatsResult.batchSkippedReason) {
-        infoIssues.push({
-          level: 'warning',
-          message: `Batch covariate was provided but not applied: ${geneStatsResult.batchSkippedReason}`,
-          context: 'GEO Auto',
-        });
-      }
-    }
-
-    const estimatedCells = parsedCounts.sampleIds.length * geneStats.length;
-    if (estimatedCells > 18_000_000) {
-      infoIssues.push({
-        level: 'warning',
-        message:
-          'Large dataset detected. For final publication DESeq2 models, prefer high-memory workstation/HPC execution and import curated workbook outputs.',
-        context: 'GEO Auto',
-      });
-    }
-
-    return appendGeoIssues(parsedWorkbook, infoIssues);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (error instanceof RangeError || /memory|allocation|out of memory|invalid array length/i.test(message)) {
-      throw new Error(
-        'Analysis stopped due to browser memory limits. Use a high-memory workstation/server for DESeq2 processing, then import the workbook into this viewer.',
-      );
-    }
-    throw error;
-  }
-}
-
-export async function analyzeGeoDatasetFromFiles(options: AnalyzeGeoFromFilesOptions): Promise<WorkbookParseResult> {
-  const rawCountsText = await readTextMaybeGzipFromFile(options.rawCountsFile);
-  const seriesMatrixText = await readTextMaybeGzipFromFile(options.seriesMatrixFile);
-  return analyzeGeoDatasetFromText({
-    accession: options.accession,
-    title: options.title,
-    organism: options.organism,
-    rawCountsText,
-    seriesMatrixText,
-    design: options.design,
-  });
-}
-
-export async function analyzeGeoDatasetFromNcbi(
-  dataset: GeoSearchResult,
-  design?: GeoAnalysisDesign,
-): Promise<WorkbookParseResult> {
+export async function loadGeoInputFromNcbi(dataset: GeoSearchResult, design?: GeoAnalysisDesign): Promise<AnalyzeGeoFromTextOptions> {
   if (!dataset.rawCountsUrl) {
     throw new Error(`No NCBI-generated raw count link was detected for ${dataset.accession}.`);
   }
-
-  const rawCountsText = await fetchTextMaybeGzip(
-    dataset.rawCountsUrl,
-    `NCBI raw counts (${dataset.accession})`,
-  );
-  const seriesMatrixUrl =
-    dataset.seriesMatrixUrl ??
-    normalizeGeoHref(
-      `https://ftp.ncbi.nlm.nih.gov/geo/series/${dataset.accession.slice(0, -3)}nnn/${dataset.accession}/matrix/${dataset.accession}_series_matrix.txt.gz`,
-    );
-  const seriesMatrixText = await fetchTextMaybeGzip(
-    seriesMatrixUrl,
-    `Series matrix metadata (${dataset.accession})`,
-  );
-
-  return analyzeGeoDatasetFromText({
-    accession: dataset.accession,
-    title: dataset.title,
-    organism: dataset.organism,
-    rawCountsText,
-    seriesMatrixText,
-    design,
-  });
+  const [rawCountsText, seriesMatrixText] = await Promise.all([
+    fetchTextMaybeGzip(dataset.rawCountsUrl, `NCBI raw counts (${dataset.accession})`),
+    resolveSeriesMatrixTextFromNcbi(dataset),
+  ]);
+  return { accession: dataset.accession, title: dataset.title, organism: dataset.organism,
+    design, rawCountsText, seriesMatrixText };
 }

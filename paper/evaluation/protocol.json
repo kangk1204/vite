@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "status": "draft-not-preregistered",
+  "seed": 20261110,
+  "timeoutMs": 240000,
+  "primary": "pnv_full versus information-equivalent pnv_basic interpretation error",
+  "gates": {
+    "institutionalDetermination": "pending",
+    "institutionalReference": null,
+    "consentMaterialsApproved": false,
+    "completedPilotParticipants": 0,
+    "preregistrationUrl": null,
+    "protocolSha256": null,
+    "plannedSampleSize": null,
+    "powerArtifactSha256": null
+  }
+}

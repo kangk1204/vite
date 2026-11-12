@@ -1,0 +1,101 @@
+{
+  "manifestVersion": 1,
+  "template": true,
+  "outputRoot": "paper/outputs/ymeth_pivot",
+  "primaryCohortKey": "gse68719_pd_primary",
+  "notes": [
+    "Template only. Fill in analysis jobs and output paths before running.",
+    "The active neural manifest now lives at paper/manifests/mental_neural_methods_case_study.json."
+  ],
+  "jobs": [
+    {
+      "key": "gse68719_pd_case_study",
+      "description": "Placeholder Parkinson disease bulk RNA-seq case study job",
+      "command": [
+        "bash",
+        "-lc",
+        "echo 'TODO: implement GSE68719 Parkinson case-study pipeline' && false"
+      ]
+    },
+    {
+      "key": "gse159699_ad_case_study",
+      "description": "Placeholder Alzheimer disease bulk RNA-seq case study job",
+      "command": [
+        "bash",
+        "-lc",
+        "echo 'TODO: implement GSE159699 Alzheimer case-study pipeline' && false"
+      ]
+    },
+    {
+      "key": "gse102556_mdd_case_study",
+      "description": "Placeholder major depressive disorder bulk RNA-seq case study job",
+      "command": [
+        "bash",
+        "-lc",
+        "echo 'TODO: implement GSE102556 MDD case-study pipeline' && false"
+      ]
+    }
+  ],
+  "cohorts": [
+    {
+      "key": "gse68719_pd_primary",
+      "enabled": false,
+      "jobKey": "gse68719_pd_case_study",
+      "datasetIdentifier": "GSE68719",
+      "diseaseArea": "parkinson_disease",
+      "role": "primary",
+      "contrastName": "PD_vs_control",
+      "contrastDefinition": "Parkinson disease BA9 postmortem brain tissue versus neurologically normal control BA9 tissue",
+      "sampleGroupSource": "Expected from GEO series matrix phenotype labels",
+      "batchHandlingRule": "To be decided after metadata inspection",
+      "notes": "Recommended first neural-health pivot cohort.",
+      "workbookPath": "results/gse68719_pd_vs_control_pathway_viewer_input.xlsx",
+      "reportPath": "paper/outputs/ymeth_pivot/reports/gse68719_pd_primary.report.html",
+      "degTablePath": "results/gse68719_pd_vs_control_deseq2.tsv",
+      "pathwayTablePath": "results/gse68719_pd_vs_control_fgsea_reactome.tsv",
+      "summaryTablePath": "results/gse68719_pd_vs_control_analysis_summary.tsv",
+      "sampleMetadataPath": "results/gse68719_pd_vs_control_sample_metadata.tsv",
+      "figurePaths": []
+    },
+    {
+      "key": "gse159699_ad_replication",
+      "enabled": false,
+      "jobKey": "gse159699_ad_case_study",
+      "datasetIdentifier": "GSE159699",
+      "diseaseArea": "alzheimers_disease",
+      "role": "replication",
+      "contrastName": "AD_vs_old_control",
+      "contrastDefinition": "Alzheimer disease hippocampus/lateral temporal lobe bulk RNA-seq versus age-matched old control tissue",
+      "sampleGroupSource": "Expected from GEO series matrix phenotype labels",
+      "batchHandlingRule": "To be decided after metadata inspection",
+      "notes": "Recommended second neural-health replication cohort.",
+      "workbookPath": "results/gse159699_ad_vs_old_control_pathway_viewer_input.xlsx",
+      "reportPath": "paper/outputs/ymeth_pivot/reports/gse159699_ad_replication.report.html",
+      "degTablePath": "results/gse159699_ad_vs_old_control_deseq2.tsv",
+      "pathwayTablePath": "results/gse159699_ad_vs_old_control_fgsea_reactome.tsv",
+      "summaryTablePath": "results/gse159699_ad_vs_old_control_analysis_summary.tsv",
+      "sampleMetadataPath": "results/gse159699_ad_vs_old_control_sample_metadata.tsv",
+      "figurePaths": []
+    },
+    {
+      "key": "gse102556_mdd_extension",
+      "enabled": false,
+      "jobKey": "gse102556_mdd_case_study",
+      "datasetIdentifier": "GSE102556",
+      "diseaseArea": "major_depressive_disorder",
+      "role": "extension",
+      "contrastName": "MDD_vs_control",
+      "contrastDefinition": "Human major depressive disorder brain tissue versus unaffected control tissue",
+      "sampleGroupSource": "Requires human-only subset selection from the series metadata",
+      "batchHandlingRule": "To be decided after region and phenotype subset are fixed",
+      "notes": "Mental-health extension cohort; resolve species and brain-region scope before activation.",
+      "workbookPath": "results/gse102556_mdd_vs_control_pathway_viewer_input.xlsx",
+      "reportPath": "paper/outputs/ymeth_pivot/reports/gse102556_mdd_extension.report.html",
+      "degTablePath": "results/gse102556_mdd_vs_control_deseq2.tsv",
+      "pathwayTablePath": "results/gse102556_mdd_vs_control_fgsea_reactome.tsv",
+      "summaryTablePath": "results/gse102556_mdd_vs_control_analysis_summary.tsv",
+      "sampleMetadataPath": "results/gse102556_mdd_vs_control_sample_metadata.tsv",
+      "figurePaths": []
+    }
+  ]
+}

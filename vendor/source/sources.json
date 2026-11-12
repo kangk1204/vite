@@ -1,0 +1,44 @@
+{
+  "bundledFile": "src/vendor/cytoscape-svg.js",
+  "bundledSha256": "530cfaeba7aaa11214ddd6cc5603413f51e39afa691173bb5efbd6a13b3e42c3",
+  "npmPackage": "cytoscape-svg@0.4.0",
+  "npmTarball": "https://registry.npmjs.org/cytoscape-svg/-/cytoscape-svg-0.4.0.tgz",
+  "npmIntegrity": "sha512-omqIzfPd1Vy9mk6lHTiR2wTbjxELxb9GXSQ2pE6W+GwAe/6/yvOUQ2h5ApFf2QhCBnpMwLkCTq5DZXxBCgUpDw==",
+  "npmBundleByteIdentical": true,
+  "embeddedCanvasRevision": "kinimesi/canvas2svg#68b8ef886ca066d07294d9ee3157f6a3a9e44599",
+  "sources": [
+    {
+      "archive": "cytoscape-svg-0.4.0-source.tar.gz",
+      "sha256": "b2342da0904b4606412a8427f74a21433fb0d3d1fef10c1d072595f10655c35d",
+      "bytes": 24532,
+      "repository": "https://github.com/kinimesi/cytoscape-svg",
+      "revision": "263e0be049a91e7a22d40b78f91ba7a9ef0e7ffb",
+      "sourceUrl": "https://codeload.github.com/kinimesi/cytoscape-svg/tar.gz/263e0be049a91e7a22d40b78f91ba7a9ef0e7ffb",
+      "package": "cytoscape-svg",
+      "version": "0.4.0",
+      "license": "GNU GPLv3",
+      "licenseFiles": [
+        "LICENSE"
+      ],
+      "author": {
+        "name": "Ilkin Safarli",
+        "email": ""
+      }
+    },
+    {
+      "archive": "canvas2svg-68b8ef8-source.tar.gz",
+      "sha256": "881242213d35bc4181322aa0f775baea37a2a78fc2b9a9a70e7194f10fcc3e45",
+      "bytes": 67869,
+      "repository": "https://github.com/kinimesi/canvas2svg",
+      "revision": "68b8ef886ca066d07294d9ee3157f6a3a9e44599",
+      "sourceUrl": "https://codeload.github.com/kinimesi/canvas2svg/tar.gz/68b8ef886ca066d07294d9ee3157f6a3a9e44599",
+      "package": "canvas2svg",
+      "version": "1.0.19",
+      "license": "MIT",
+      "licenseFiles": [
+        "LICENSE"
+      ],
+      "author": "Kerry Liu"
+    }
+  ]
+}
