@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "distribution": "public-software",
-  "sourceSnapshot": "b9a23990e371e981687208ce58f9b3ddd67b208eacd547c9311429387e769bb0",
-  "baseGitCommit": "af8ca5bc4fe95d5ba2be194cb331ab6dc56ba3a1",
+  "sourceSnapshot": "262b9be3e922e144e44486f9305bd89d6a922da4585bf0fa64899fb6819fce62",
+  "baseGitCommit": "a1ad07bdfb22c0c1ea6e8c3a505856907516bc53",
   "workingTreeDirty": true,
   "files": [
     {
@@ -895,8 +895,8 @@
     },
     {
       "path": "src/report/runtime.js",
-      "sha256": "4e42745df658fc8bd31152801f0f86f9dc3699a428ccd6f6ca2a2e3f795887a6",
-      "bytes": 164465,
+      "sha256": "0046f5487de392e258e52e903bf124968601405b383cde753d59af88b474f070",
+      "bytes": 165558,
       "mode": "0o644"
     },
     {
@@ -1005,6 +1005,12 @@
       "path": "tests/builderState.test.ts",
       "sha256": "6deaccd6990e3ae578426411ddeb14b2d67788ccb91043180247676dcbed0eb8",
       "bytes": 4566,
+      "mode": "0o644"
+    },
+    {
+      "path": "tests/e2e/combined-export-layout.mjs",
+      "sha256": "fc584efb8997ef20f2a7db9811219786445a6dd5c16b206c33b745190fb372f8",
+      "bytes": 16240,
       "mode": "0o644"
     },
     {

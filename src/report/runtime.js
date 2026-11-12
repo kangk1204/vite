@@ -3474,7 +3474,7 @@
         <rect x="${margin.left}" y="${margin.top}" width="${innerWidth}" height="${innerHeight}" fill="rgba(255,255,255,0.62)" stroke="#d6e3f8"/>
         <line x1="${margin.left}" y1="${zeroY.toFixed(2)}" x2="${(margin.left + innerWidth).toFixed(2)}" y2="${zeroY.toFixed(2)}" stroke="#8ea6cc" stroke-dasharray="5 4" stroke-width="1"/>
         ${hitLines}
-        <path d="${pathD}" fill="none" stroke="url(#pnv-plot-line)" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/>
+        <path d="${pathD}" fill="none" stroke="${options.print ? '#245ed6' : 'url(#pnv-plot-line)'}" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/>
         <circle cx="${peakX.toFixed(2)}" cy="${peakY.toFixed(2)}" r="4.2" fill="#102039" />
         <text x="${Math.max(margin.left + 8, Math.min(width - margin.right - 80, peakX + 8)).toFixed(2)}" y="${(Math.max(margin.top + 14, peakY - 10)).toFixed(2)}" font-size="10" fill="#102039">Peak ${formatSignedNumber(peak.peakEs)}</text>
         <line x1="${margin.left}" y1="${margin.top}" x2="${margin.left}" y2="${axisBottom}" stroke="#7a97c9" stroke-width="1.1"/>
@@ -3494,12 +3494,12 @@
     const titleFontSize = widthPt < 300 ? 14 : widthPt < 420 ? 16 : 18;
     const titleLineHeight = titleFontSize + 4;
     const titleBlockHeight = titleLines.length * titleLineHeight;
-    const headerHeight = 72 + titleBlockHeight;
-    const plotY = headerHeight + 14;
+    const lastStatsBaseline = 94 + titleBlockHeight;
+    const plotY = lastStatsBaseline + 20;
     const minPlotHeight = 210;
     const heightPt = Math.max(baseHeightPt, plotY + minPlotHeight + 18);
     const plotHeight = Math.max(minPlotHeight, heightPt - plotY - 18);
-    const plotSvg = wrapStandaloneSvg(buildEnrichmentPlotSvg(pathway, { width: 1100, height: 620 }), {
+    const plotSvg = wrapStandaloneSvg(buildEnrichmentPlotSvg(pathway, { width: 1100, height: 620, print: true }), {
       key: 'plot',
       widthInches: Math.max(1, (widthPt - 28) / 72),
       heightInches: Math.max(1, plotHeight / 72),
@@ -3519,79 +3519,92 @@
         </defs>
         <rect width="100%" height="100%" rx="18" fill="#ffffff" />
         <text x="24" y="24" font-size="10" font-weight="700" letter-spacing="1.2" fill="#6b7f9f">GSEA ENRICHMENT PLOT</text>
-        <text x="${widthPt - 24}" y="24" font-size="10" font-weight="600" text-anchor="end" fill="#6b7f9f">${escapeXml(data.project.conditionA)} → ${escapeXml(data.project.conditionB)}</text>
+        <text x="${widthPt - 24}" y="24" font-size="10" font-weight="600" text-anchor="end" fill="#6b7f9f">${escapeXml(data.project.conditionA)} to ${escapeXml(data.project.conditionB)}</text>
         <text x="24" y="48" font-size="${titleFontSize}" font-weight="700" fill="#102039">${titleTspans}</text>
         <text x="24" y="${48 + titleBlockHeight + 12}" font-size="11" fill="#5d708e">${escapeXml(pathway.collection)}</text>
         <text x="24" y="${48 + titleBlockHeight + 30}" font-size="11" fill="#334968">${escapeXml(statsLineA)}</text>
-        <text x="24" y="${48 + titleBlockHeight + 46}" font-size="11" fill="#334968">${escapeXml(statsLineB)}</text>
+        <text x="24" y="${lastStatsBaseline}" font-size="11" fill="#334968">${escapeXml(statsLineB)}</text>
         <rect x="14" y="${plotY - 8}" width="${widthPt - 28}" height="${plotHeight + 10}" rx="18" fill="#f8fbff" stroke="#d8e4f6" filter="url(#plotCardShadow)" />
         ${nestSvg(plotSvg, 18, plotY, widthPt - 36, plotHeight)}
       </svg>
     `;
   }
 
+  // SVG, raster and PDF exports share the same measured lines and card geometry.
+  function exportTextBlock(context, text, x, top, width, fontSize, weight, color) {
+    const value = String(text ?? '').trim();
+    const lineHeight = fontSize * 1.28;
+    context.font = `${weight} ${fontSize}px Arial`;
+    const fits = (line) => context.measureText(line).width <= width * 0.97;
+    const lines = [];
+    let current = '';
+    for (const word of value.split(/\s+/)) {
+      const next = current ? `${current} ${word}` : word;
+      if (fits(next)) {
+        current = next;
+        continue;
+      }
+      if (current) { lines.push(current); current = ''; }
+      if (fits(word)) { current = word; continue; }
+      for (const char of word) {
+        if (current && !fits(current + char)) { lines.push(current); current = ''; }
+        current += char;
+      }
+    }
+    if (current) lines.push(current);
+    const svg = lines.map((line, index) => `<text x="${x}" y="${top + fontSize + index * lineHeight}" font-size="${fontSize}" font-weight="${weight}" fill="${color}">${escapeXml(line)}</text>`).join('');
+    return { svg, bottom: top + lines.length * lineHeight };
+  }
+
   async function buildFullFigureSvg(pathway, preset) {
-    const widthPt = preset.widthInches * 72;
-    const heightPt = preset.heightInches * 72;
+    const width = preset.widthInches * 72, height = preset.heightInches * 72;
+    const scale = width < 330 ? 0.66 : width > 750 ? 1.24 : 1;
+    const margin = 12 * scale, gap = 8 * scale, inset = 7 * scale;
+    const available = width - 2 * margin;
+    const context = document.createElement('canvas').getContext('2d');
+    if (!context) throw new Error('Text measurement is unavailable for figure export.');
     const summary = summarizeEnrichment(pathway);
     const { visibleNodes, visibleEdges } = getPathwayRenderData(pathway);
-    const titleLines = wrapTitleLines(pathway.pathwayName, widthPt < 420 ? 44 : 68);
-    const titleFontSize = widthPt < 420 ? 17 : 20;
-    const titleLineHeight = titleFontSize + 5;
-    const titleBlockHeight = titleLines.length * titleLineHeight;
-    const headerHeight = 88 + titleBlockHeight;
-    const contentTop = headerHeight + 12;
-    const contentHeight = heightPt - contentTop - 18;
-    const gutter = 18;
-    const networkCardWidth = widthPt * 0.63;
-    const plotCardWidth = widthPt - networkCardWidth - gutter - 28;
-    const networkCardHeight = contentHeight;
-    const plotCardHeight = contentHeight;
-    const innerPad = 12;
-    const networkSvg = wrapStandaloneSvg(cy.svg({ full: true, bg: '#ffffff' }), {
-      key: 'network',
-      widthInches: Math.max(1, (networkCardWidth - innerPad * 2) / 72),
-      heightInches: Math.max(1, (networkCardHeight - 46 - innerPad * 2) / 72),
+    const tested = evidence.pathways?.[pathway.pathwayId]?.testedGenes || evidence.pathways?.[pathway.key]?.testedGenes;
+    const geneView = state.showAllGenes && !pathway.fallbackToLeadingEdge ? (tested ? 'All tested pathway genes' : 'Supplied/reference genes') : 'Leading edge';
+    const contrast = `${data.project.conditionA} to ${data.project.conditionB}`;
+    const project = `${data.project.projectTitle} · ${pathway.collection}`;
+    const statsA = `NES ${formatSignedNumber(pathway.nes)} · FDR ${formatSci(pathway.padj)} · Peak ES ${formatSignedNumber(summary.peakEs)} · Peak rank ${summary.peakRank ?? 'NA'}/${summary.rankedListSize}`;
+    const statsB = `Visible genes ${visibleNodes.length}/${pathway.allGenes.length} · Edges ${visibleEdges.length} · Leading edge ${summary.leadingEdgeCount} · Hits ${summary.hitCount}${summary.peakGene ? ` · Peak gene ${summary.peakGene}` : ''}`;
+    const settings = `View ${geneView} · PPI ${state.ppiMode} · Min score ${state.edgeScoreMin} · Top genes ${state.topGeneCount || 'All'} · Top edges ${state.topEdgePercentile}% · Node size ${Math.round(state.nodeSizeScale * 100)}%`;
+    const header = [];
+    let cursor = margin;
+    function addHeader(value, size, weight, color, spacing) {
+      const block = exportTextBlock(context, value, margin, cursor, available, size * scale, weight, color);
+      header.push(block.svg);
+      cursor = block.bottom + spacing * scale;
+    }
+    addHeader(`PATHWAY NETWORK SUMMARY · ${contrast}`, 7.8, 700, '#526780', 2);
+    addHeader(pathway.pathwayName, 15.5, 700, '#102039', 2);
+    addHeader(project, 8.7, 400, '#4b5e77', 2);
+    addHeader(statsA, 8.6, 400, '#223750', 1);
+    addHeader(statsB, 8.6, 400, '#223750', 1);
+    addHeader(settings, 7.8, 400, '#526780', 0);
+
+    const cardTop = cursor + gap, cardHeight = height - margin - cardTop;
+    const networkWidth = (available - gap) * 0.58;
+    function panel(x, cardWidth, heading, description, artwork) {
+      const innerWidth = cardWidth - 2 * inset;
+      const label = exportTextBlock(context, heading, x + inset, cardTop + inset, innerWidth, 8 * scale, 700, '#425a75');
+      const note = exportTextBlock(context, description, x + inset, label.bottom + scale, innerWidth, 8.2 * scale, 400, '#526780');
+      const artTop = note.bottom + 4 * scale;
+      const artHeight = height - margin - inset - artTop;
+      if (artHeight < Math.max(20, height * 0.15)) throw new Error('The complete text leaves too little room for the figure. Choose a larger export preset.');
+      return `<rect x="${x}" y="${cardTop}" width="${cardWidth}" height="${cardHeight}" rx="${7 * scale}" fill="#f8fbff" stroke="#cbd8e9"/>${label.svg}${note.svg}${nestSvg(artwork(innerWidth, artHeight), x + inset, artTop, innerWidth, artHeight)}`;
+    }
+    const network = panel(margin, networkWidth, 'NETWORK VIEW', 'Node size -log10(FDR) · color leading edge/pathway/context · edge width STRING score', () => cy.svg({ full: true, bg: '#ffffff' }));
+    const plot = panel(margin + networkWidth + gap, available - networkWidth - gap, 'GSEA ENRICHMENT', 'Running enrichment score with ranked hits', (w, h) => {
+      const plotScale = Math.max(1, 260 / w, 220 / h);
+      return buildEnrichmentPlotSvg(pathway, { width: w * plotScale, height: h * plotScale, print: true });
     });
-    const plotSvg = wrapStandaloneSvg(buildEnrichmentPlotSvg(pathway, { width: 1100, height: 700 }), {
-      key: 'plot',
-      widthInches: Math.max(1, (plotCardWidth - innerPad * 2) / 72),
-      heightInches: Math.max(1, (plotCardHeight - 46 - innerPad * 2) / 72),
-    });
-    const titleTspans = titleLines
-      .map((line, index) => `<tspan x="24" dy="${index === 0 ? 0 : titleLineHeight}">${escapeXml(line)}</tspan>`)
-      .join('');
-    const statsLineA = `NES ${formatSignedNumber(pathway.nes)} · FDR ${formatSci(pathway.padj)} · Peak ES ${formatSignedNumber(summary.peakEs)} · Peak rank ${summary.peakRank ?? 'NA'}/${summary.rankedListSize}`;
-    const statsLineB = `Visible genes ${visibleNodes.length}/${pathway.allGenes.length} · Edges ${visibleEdges.length} · Leading edge ${summary.leadingEdgeCount} · Hits ${summary.hitCount}${summary.peakGene ? ` · Peak gene ${summary.peakGene}` : ''}`;
-    const viewLine = `View ${state.showAllGenes && !pathway.fallbackToLeadingEdge ? ((evidence.pathways?.[pathway.pathwayId]?.testedGenes || evidence.pathways?.[pathway.key]?.testedGenes) ? 'All tested pathway genes' : 'Supplied/reference genes') : 'Leading edge'} · PPI ${state.ppiMode} · Min score ${state.edgeScoreMin} · Top genes ${state.topGeneCount || 'All'} · Top edges ${state.topEdgePercentile}% · Node size ${Math.round(state.nodeSizeScale * 100)}%`;
-
-    return `
-      <svg xmlns="http://www.w3.org/2000/svg" width="${widthPt}pt" height="${heightPt}pt" viewBox="0 0 ${widthPt} ${heightPt}">
-        <defs>
-          <filter id="fullCardShadow" x="-10%" y="-10%" width="120%" height="120%">
-            <feDropShadow dx="0" dy="10" stdDeviation="10" flood-color="#8aa2cb" flood-opacity="0.14"/>
-          </filter>
-        </defs>
-        <rect width="100%" height="100%" fill="#ffffff" rx="18" />
-        <text x="24" y="24" font-size="10" font-weight="700" letter-spacing="1.2" fill="#6b7f9f">PATHWAY NETWORK SUMMARY</text>
-        <text x="${widthPt - 24}" y="24" font-size="10" font-weight="600" text-anchor="end" fill="#6b7f9f">${escapeXml(data.project.conditionA)} → ${escapeXml(data.project.conditionB)}</text>
-        <text x="24" y="50" font-size="${titleFontSize}" font-weight="700" fill="#102039">${titleTspans}</text>
-        <text x="24" y="${50 + titleBlockHeight + 10}" font-size="11" fill="#5d708e">${escapeXml(data.project.projectTitle)} · ${escapeXml(pathway.collection)}</text>
-        <text x="24" y="${50 + titleBlockHeight + 28}" font-size="11" fill="#334968">${escapeXml(statsLineA)}</text>
-        <text x="24" y="${50 + titleBlockHeight + 44}" font-size="11" fill="#334968">${escapeXml(statsLineB)}</text>
-        <text x="24" y="${50 + titleBlockHeight + 60}" font-size="10" fill="#6b7f9f">${escapeXml(viewLine)}</text>
-
-        <rect x="14" y="${contentTop}" width="${networkCardWidth}" height="${networkCardHeight}" rx="18" fill="#f8fbff" stroke="#d8e4f6" filter="url(#fullCardShadow)" />
-        <text x="30" y="${contentTop + 22}" font-size="10" font-weight="700" letter-spacing="1.0" fill="#6b7f9f">NETWORK VIEW</text>
-        <text x="30" y="${contentTop + 38}" font-size="11" fill="#5d708e">Node size −log10(FDR) · color leading edge/pathway/context · edge width STRING score</text>
-        ${nestSvg(networkSvg, 18 + innerPad, contentTop + 46, networkCardWidth - innerPad * 2, networkCardHeight - 46 - innerPad)}
-
-        <rect x="${18 + networkCardWidth + gutter - 4}" y="${contentTop}" width="${plotCardWidth}" height="${plotCardHeight}" rx="18" fill="#f8fbff" stroke="#d8e4f6" filter="url(#fullCardShadow)" />
-        <text x="${18 + networkCardWidth + gutter + 12}" y="${contentTop + 22}" font-size="10" font-weight="700" letter-spacing="1.0" fill="#6b7f9f">GSEA ENRICHMENT</text>
-        <text x="${18 + networkCardWidth + gutter + 12}" y="${contentTop + 38}" font-size="11" fill="#5d708e">Running enrichment score with ranked hits</text>
-        ${nestSvg(plotSvg, 18 + networkCardWidth + gutter + 8, contentTop + 46, plotCardWidth - innerPad * 2, plotCardHeight - 46 - innerPad)}
-      </svg>
-    `;
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}pt" height="${height}pt" viewBox="0 0 ${width} ${height}" font-family="Arial, Helvetica, sans-serif">
+      <title>${escapeXml(pathway.pathwayName)}</title><desc>${escapeXml([contrast, project, statsA, statsB, settings].join('\n'))}</desc>
+      <rect width="100%" height="100%" fill="#fff"/>${header.join('')}${network}${plot}</svg>`;
   }
 
   async function downloadByFormat(filenameBase, format, svgText, preset, dpi) {
@@ -3606,14 +3619,21 @@
       const { jsPDF, svg2pdf } = await ensurePdfExportRuntimeLoaded();
       const pdf = new jsPDF({
         unit: 'pt',
+        orientation: preset.widthInches > preset.heightInches ? 'landscape' : 'portrait',
         format: [preset.widthInches * 72, preset.heightInches * 72],
       });
-      await svg2pdf(svgElement, pdf, {
-        x: 0,
-        y: 0,
-        width: preset.widthInches * 72,
-        height: preset.heightInches * 72,
-      });
+      const width = preset.widthInches * 72, height = preset.heightInches * 72;
+      // jsPDF's base fonts cannot encode every scientific identifier. Preserve
+      // those glyphs using the same browser render as the selected-DPI PNG.
+      const requiresUnicodeFont = [...svgElement.querySelectorAll('text')].some(el => /[^\x20-\x7e\xa0-\xff]/u.test(el.textContent.replace(/\s/g, ' ')));
+      if (requiresUnicodeFont) {
+        const png = await rasterizeSvg(svgText, preset, dpi, 'image/png');
+        pdf.addImage(new Uint8Array(await png.arrayBuffer()), 'PNG', 0, 0, width, height, undefined, 'FAST');
+        pdf.setProperties({ title: svgElement.querySelector('title')?.textContent || filenameBase,
+          subject: `Rasterized at ${dpi} dpi to preserve Unicode labels` });
+      } else {
+        await svg2pdf(svgElement, pdf, { x: 0, y: 0, width, height });
+      }
       pdf.save(`${filenameBase}.pdf`);
       return;
     }
