@@ -1,5 +1,7 @@
 # Pathway Network Viewer v1
 
+The November 12, 2026 publication release includes the current analysis software and an offline reviewer package. Extract the reviewer ZIP and open `index.html` in a browser. [Publication release](https://github.com/kangk1204/vite/releases/tag/publication-2026-11-12) · [Download reviewer ZIP](https://github.com/kangk1204/vite/releases/download/publication-2026-11-12/pnv-reviewer-f2a28be7fc1d.zip) · [Browse released source](https://github.com/kangk1204/vite/tree/a1ad07bdfb22c0c1ea6e8c3a505856907516bc53)
+
 Offline figure builder for bulk RNA-seq pathway storytelling. The app turns a single Excel workbook into a standalone interactive `report.html` that opens without a server and exports publication-ready `PDF` / `SVG` / `PNG` / `JPG`.
 
 ## What ships
