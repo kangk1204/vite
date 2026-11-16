@@ -77,6 +77,152 @@ read_reactome_pathways <- function(zip_path) {
   pathways
 }
 
+get_git_commit <- function() {
+  commit <- tryCatch(
+    system2("git", c("rev-parse", "--short", "HEAD"), stdout = TRUE, stderr = FALSE),
+    error = function(...) character(0)
+  )
+  if (length(commit) && nzchar(commit[[1]])) {
+    return(commit[[1]])
+  }
+  "unknown"
+}
+
+get_reference_asset_version <- function(metadata_path = "src/reference/generated/metadata.json") {
+  if (!file.exists(metadata_path)) {
+    return("unknown")
+  }
+  meta <- fromJSON(metadata_path)
+  paste(
+    sprintf("reactome-%s", meta$reactomePathways %||% "na"),
+    sprintf("hallmark-%s", meta$hallmarkPathways %||% "na"),
+    sprintf("string-%s", meta$stringScoreCutoff %||% "na"),
+    sprintf("huri-%s", meta$huriPpiEdges %||% "na"),
+    sprintf("mode-%s", meta$hallmarkMode %||% "na"),
+    sep = "."
+  )
+}
+
+`%||%` <- function(value, fallback) {
+  if (is.null(value) || length(value) == 0 || !nzchar(as.character(value[[1]]))) {
+    fallback
+  } else {
+    value[[1]]
+  }
+}
+
+build_gene_table <- function(res_df, normalized_counts, condition_a_samples, condition_b_samples) {
+  res_df[, .(
+    gene_symbol = gene,
+    log2fc = log2FoldChange,
+    padj = padj,
+    pvalue = pvalue,
+    rank_metric = stat,
+    condition_a_mean = rowMeans(normalized_counts[gene, condition_a_samples, drop = FALSE]),
+    condition_b_mean = rowMeans(normalized_counts[gene, condition_b_samples, drop = FALSE])
+  )]
+}
+
+build_pathway_table <- function(gsea_df) {
+  gsea_df[, .(
+    pathway_id = pathway_id,
+    pathway_name = pathway_name,
+    collection = "Reactome",
+    nes = NES,
+    padj = padj,
+    leading_edge_genes = leadingEdge
+  )]
+}
+
+write_viewer_workbook <- function(
+  output_path,
+  project_title,
+  contrast_name,
+  condition_a,
+  condition_b,
+  dataset_identifier,
+  sample_group_source,
+  batch_handling_rule,
+  notes,
+  gene_table,
+  pathway_table,
+  analysis_timestamp,
+  git_commit,
+  reference_asset_version
+) {
+  project_table <- data.frame(
+    project_title = project_title,
+    contrast_name = contrast_name,
+    condition_a = condition_a,
+    condition_b = condition_b,
+    species = "human",
+    dataset_identifier = dataset_identifier,
+    contrast_definition = sprintf("%s versus %s", condition_b, condition_a),
+    sample_group_source = sample_group_source,
+    batch_handling_rule = batch_handling_rule,
+    analysis_timestamp = analysis_timestamp,
+    git_commit = git_commit,
+    reference_asset_version = reference_asset_version,
+    notes = notes,
+    stringsAsFactors = FALSE
+  )
+
+  write_xlsx(
+    list(
+      Project = project_table,
+      Genes = gene_table,
+      Pathways = pathway_table
+    ),
+    output_path
+  )
+}
+
+write_contrast_summary <- function(
+  output_path,
+  cohort_id,
+  dataset_identifier,
+  contrast_name,
+  condition_a,
+  condition_b,
+  sample_metadata,
+  res_df,
+  gsea_df
+) {
+  summary_table <- data.table(
+    metric = c(
+      "cohort_id",
+      "dataset_identifier",
+      "contrast_name",
+      "condition_a",
+      "condition_b",
+      "contrast_samples_total",
+      "condition_a_samples",
+      "condition_b_samples",
+      "tested_genes",
+      "DEGs_FDR_lt_0.05_absLFC_gt_1",
+      "Reactome_pathways_FDR_lt_0.05",
+      "Top_up_pathway",
+      "Top_down_pathway"
+    ),
+    value = c(
+      cohort_id,
+      dataset_identifier,
+      contrast_name,
+      condition_a,
+      condition_b,
+      nrow(sample_metadata),
+      sum(sample_metadata$contrast_group == "A"),
+      sum(sample_metadata$contrast_group == "B"),
+      nrow(res_df),
+      sum(res_df$padj < 0.05 & abs(res_df$log2FoldChange) > 1, na.rm = TRUE),
+      sum(gsea_df$padj < 0.05, na.rm = TRUE),
+      gsea_df[order(padj, -NES)][NES > 0][1]$pathway_name,
+      gsea_df[order(padj, NES)][NES < 0][1]$pathway_name
+    )
+  )
+  fwrite(summary_table, output_path, sep = "\t")
+}
+
 make_volcano <- function(res_df, output_stub, title_text, label_candidates) {
   plot_df <- copy(res_df)
   plot_df[, neglog10_padj := -log10(pmax(padj, 1e-300))]
@@ -144,6 +290,75 @@ make_pathway_dotplot <- function(gsea_df, output_stub, title_text) {
 
   ggsave(sprintf("figures/%s.pdf", output_stub), p, width = 8.2, height = plot_height)
   ggsave(sprintf("figures/%s.png", output_stub), p, width = 8.2, height = plot_height, dpi = 320)
+}
+
+iso_timestamp <- function() {
+  format(as.POSIXct(Sys.time(), tz = "UTC"), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
+}
+
+current_git_commit <- function() {
+  env_value <- Sys.getenv("PNV_GIT_COMMIT", unset = "")
+  if (nzchar(env_value)) {
+    return(env_value)
+  }
+  "local-r-run"
+}
+
+current_reference_asset_version <- function() {
+  env_value <- Sys.getenv("PNV_REFERENCE_ASSET_VERSION", unset = "")
+  if (nzchar(env_value)) {
+    return(env_value)
+  }
+  "reference-unspecified"
+}
+
+write_viewer_workbook <- function(
+  output_path,
+  project_title,
+  contrast_name,
+  condition_a,
+  condition_b,
+  dataset_identifier,
+  contrast_definition,
+  sample_group_source,
+  batch_handling_rule,
+  gene_table,
+  pathway_table,
+  notes
+) {
+  project_table <- data.frame(
+    project_title = project_title,
+    contrast_name = contrast_name,
+    condition_a = condition_a,
+    condition_b = condition_b,
+    species = "human",
+    dataset_identifier = dataset_identifier,
+    contrast_definition = contrast_definition,
+    sample_group_source = sample_group_source,
+    batch_handling_rule = batch_handling_rule,
+    analysis_timestamp = iso_timestamp(),
+    git_commit = current_git_commit(),
+    reference_asset_version = current_reference_asset_version(),
+    notes = notes,
+    stringsAsFactors = FALSE
+  )
+
+  write_xlsx(
+    list(
+      Project = project_table,
+      Genes = gene_table,
+      Pathways = pathway_table
+    ),
+    output_path
+  )
+}
+
+write_metric_summary <- function(output_path, metrics) {
+  summary_table <- data.table(
+    metric = names(metrics),
+    value = unname(unlist(metrics))
+  )
+  fwrite(summary_table, output_path, sep = "\t")
 }
 
 counts <- fread(counts_path)
@@ -273,66 +488,174 @@ concordance_plot <- ggplot(shared_pathways, aes(NES_healthy, NES_paired, color =
 ggsave("figures/figure4_pathway_concordance.pdf", concordance_plot, width = 6.5, height = 5.4)
 ggsave("figures/figure4_pathway_concordance.png", concordance_plot, width = 6.5, height = 5.4, dpi = 320)
 
-top_pathways <- gsea_res[padj < 0.05][order(padj, -NES)][1:40]
-gene_table <- res_df[, .(
-  gene_symbol = gene,
-  log2fc = log2FoldChange,
-  padj = padj,
-  pvalue = pvalue,
-  rank_metric = stat,
-  condition_a_mean = rowMeans(counts(dds, normalized = TRUE)[gene, psoriasis_vs_ctrl_md$group == "CTRL_healthy", drop = FALSE]),
-  condition_b_mean = rowMeans(counts(dds, normalized = TRUE)[gene, psoriasis_vs_ctrl_md$group == "PSO_lesional", drop = FALSE])
-)]
-
-pathway_table <- top_pathways[, .(
-  pathway_id = pathway_id,
-  pathway_name = pathway_name,
-  collection = "Reactome",
-  nes = NES,
-  padj = padj,
-  leading_edge_genes = leadingEdge
-)]
-
-project_table <- data.frame(
+top_pathways <- head(gsea_res[padj < 0.05][order(padj, -NES)], 40)
+gene_table <- build_gene_table(
+  res_df,
+  counts(dds, normalized = TRUE),
+  psoriasis_vs_ctrl_md$sample[psoriasis_vs_ctrl_md$group == "CTRL_healthy"],
+  psoriasis_vs_ctrl_md$sample[psoriasis_vs_ctrl_md$group == "PSO_lesional"]
+)
+pathway_table <- build_pathway_table(top_pathways)
+primary_sample_md <- as.data.table(copy(psoriasis_vs_ctrl_md))
+primary_sample_md[, contrast_group := ifelse(group == "CTRL_healthy", "A", "B")]
+fwrite(primary_sample_md, "results/psoriasis_lesional_vs_healthy_sample_metadata.tsv", sep = "\t")
+write_viewer_workbook(
+  output_path = "results/psoriasis_lesional_vs_healthy_pathway_viewer_input.xlsx",
   project_title = "Psoriasis lesional versus healthy skin",
   contrast_name = "PSO_lesional_vs_CTRL_healthy",
   condition_a = "Healthy skin",
   condition_b = "Psoriasis lesion",
-  species = "human",
-  stringsAsFactors = FALSE
+  dataset_identifier = "GSE121212",
+  contrast_definition = "Psoriasis lesional skin versus healthy control skin",
+  sample_group_source = "Parsed from GEO sample titles in the series matrix",
+  batch_handling_rule = "No explicit batch adjustment; GEO metadata did not expose a curated batch factor",
+  gene_table = gene_table,
+  pathway_table = pathway_table,
+  notes = "Primary psoriasis case-study contrast used in the manuscript."
+)
+file.copy(
+  "results/psoriasis_lesional_vs_healthy_pathway_viewer_input.xlsx",
+  "results/psoriasis_pathway_viewer_input.xlsx",
+  overwrite = TRUE
 )
 
-write_xlsx(
-  list(
-    Project = project_table,
-    Genes = gene_table,
-    Pathways = pathway_table
-  ),
-  "results/psoriasis_pathway_viewer_input.xlsx"
+paired_gene_table <- build_gene_table(
+  res_paired_df,
+  counts(dds_paired, normalized = TRUE),
+  paired_md$sample[paired_md$state == "nonlesional"],
+  paired_md$sample[paired_md$state == "lesional"]
+)
+paired_pathway_table <- build_pathway_table(head(gsea_paired[padj < 0.05][order(padj, -NES)], 40))
+paired_sample_md <- as.data.table(copy(paired_md))
+paired_sample_md[, contrast_group := ifelse(state == "nonlesional", "A", "B")]
+fwrite(paired_sample_md, "results/psoriasis_lesional_vs_nonlesional_sample_metadata.tsv", sep = "\t")
+
+write_viewer_workbook(
+  output_path = "results/psoriasis_lesional_vs_nonlesional_pathway_viewer_input.xlsx",
+  project_title = "Psoriasis lesional versus non-lesional paired skin",
+  contrast_name = "PSO_lesional_vs_nonlesional",
+  condition_a = "Psoriasis non-lesional skin",
+  condition_b = "Psoriasis lesion",
+  dataset_identifier = "GSE121212",
+  contrast_definition = "Matched psoriasis lesional skin versus paired non-lesional skin",
+  sample_group_source = "Parsed from GEO sample titles in the series matrix and paired by patient_id",
+  batch_handling_rule = "Patient ID modeled in DESeq2 design (~ patient_id + state); no separate batch covariate",
+  gene_table = paired_gene_table,
+  pathway_table = paired_pathway_table,
+  notes = "Internal validation contrast derived from paired psoriasis biopsies."
 )
 
-summary_table <- data.table(
-  metric = c(
-    "total_samples",
-    "psoriasis_lesional_samples",
-    "healthy_control_samples",
-    "paired_psoriasis_samples",
-    "tested_genes_primary",
-    "DEGs_FDR_lt_0.05_absLFC_gt_1",
-    "Reactome_pathways_FDR_lt_0.05",
-    "Top_up_pathway",
-    "Top_down_pathway"
-  ),
-  value = c(
-    nrow(sample_md),
-    sum(psoriasis_vs_ctrl_md$group == "PSO_lesional"),
-    sum(psoriasis_vs_ctrl_md$group == "CTRL_healthy"),
-    nrow(paired_md),
-    nrow(res_df),
-    sum(res_df$padj < 0.05 & abs(res_df$log2FoldChange) > 1, na.rm = TRUE),
-    sum(gsea_res$padj < 0.05, na.rm = TRUE),
-    gsea_res[order(padj, -NES)][NES > 0][1]$pathway_name,
-    gsea_res[order(padj, NES)][NES < 0][1]$pathway_name
+ad_vs_ctrl_md <- sample_md[sample_md$group %in% c("AD_lesional", "CTRL_healthy"), ]
+ad_vs_ctrl_counts <- count_matrix[, ad_vs_ctrl_md$sample]
+ad_vs_ctrl_md$group <- factor(ad_vs_ctrl_md$group, levels = c("CTRL_healthy", "AD_lesional"))
+rownames(ad_vs_ctrl_md) <- ad_vs_ctrl_md$sample
+
+dds_ad <- DESeqDataSetFromMatrix(
+  countData = ad_vs_ctrl_counts,
+  colData = ad_vs_ctrl_md,
+  design = ~ group
+)
+keep_ad <- rowSums(counts(dds_ad) >= 10) >= ceiling(0.15 * ncol(dds_ad))
+dds_ad <- dds_ad[keep_ad, ]
+dds_ad <- DESeq(dds_ad, quiet = TRUE)
+res_ad <- results(dds_ad, contrast = c("group", "AD_lesional", "CTRL_healthy"))
+res_ad <- lfcShrink(dds_ad, coef = "group_AD_lesional_vs_CTRL_healthy", res = res_ad, type = "normal")
+res_ad_df <- as.data.table(as.data.frame(res_ad), keep.rownames = "gene")
+res_ad_df <- res_ad_df[order(padj, -abs(log2FoldChange))]
+fwrite(res_ad_df, "results/atopic_dermatitis_lesional_vs_healthy_deseq2.tsv", sep = "\t")
+
+ranked_ad <- res_ad_df[!is.na(stat)][order(-stat)]$stat
+names(ranked_ad) <- res_ad_df[!is.na(stat)][order(-stat)]$gene
+gsea_ad <- as.data.table(fgseaMultilevel(pathways = reactome, stats = ranked_ad, minSize = 15, maxSize = 500))
+gsea_ad[, leadingEdge := vapply(leadingEdge, function(x) paste(x, collapse = ";"), character(1))]
+gsea_ad[, pathway_id := sub(" :: .*", "", pathway)]
+gsea_ad[, pathway_name := sub("^.* :: ", "", pathway)]
+gsea_ad <- gsea_ad[order(padj, -NES)]
+fwrite(gsea_ad, "results/atopic_dermatitis_lesional_vs_healthy_fgsea_reactome.tsv", sep = "\t")
+
+ad_gene_table <- build_gene_table(
+  res_ad_df,
+  counts(dds_ad, normalized = TRUE),
+  ad_vs_ctrl_md$sample[ad_vs_ctrl_md$group == "CTRL_healthy"],
+  ad_vs_ctrl_md$sample[ad_vs_ctrl_md$group == "AD_lesional"]
+)
+ad_pathway_table <- build_pathway_table(gsea_ad[padj < 0.05][order(padj, -NES)][1:40])
+ad_sample_md <- as.data.table(copy(ad_vs_ctrl_md))
+ad_sample_md[, contrast_group := ifelse(group == "CTRL_healthy", "A", "B")]
+fwrite(ad_sample_md, "results/atopic_dermatitis_lesional_vs_healthy_sample_metadata.tsv", sep = "\t")
+write_viewer_workbook(
+  output_path = "results/atopic_dermatitis_lesional_vs_healthy_pathway_viewer_input.xlsx",
+  project_title = "Atopic dermatitis lesional versus healthy skin",
+  contrast_name = "AD_lesional_vs_CTRL_healthy",
+  condition_a = "Healthy skin",
+  condition_b = "Atopic dermatitis lesion",
+  dataset_identifier = "GSE121212",
+  contrast_definition = "Atopic dermatitis lesional skin versus healthy control skin",
+  sample_group_source = "Parsed from GEO sample titles in the series matrix",
+  batch_handling_rule = "No explicit batch adjustment; GEO metadata did not expose a curated batch factor",
+  gene_table = ad_gene_table,
+  pathway_table = ad_pathway_table,
+  notes = "Non-psoriasis generalization contrast from the same public accession."
+)
+
+write_metric_summary(
+  "results/psoriasis_lesional_vs_healthy_analysis_summary.tsv",
+  c(
+    cohort_id = "gse121212_psoriasis_primary",
+    dataset_identifier = "GSE121212",
+    contrast_name = "PSO_lesional_vs_CTRL_healthy",
+    condition_a = "Healthy skin",
+    condition_b = "Psoriasis lesion",
+    contrast_samples_total = nrow(primary_sample_md),
+    condition_a_samples = sum(primary_sample_md$contrast_group == "A"),
+    condition_b_samples = sum(primary_sample_md$contrast_group == "B"),
+    tested_genes_primary = nrow(res_df),
+    DEGs_FDR_lt_0.05_absLFC_gt_1 = sum(res_df$padj < 0.05 & abs(res_df$log2FoldChange) > 1, na.rm = TRUE),
+    Reactome_pathways_FDR_lt_0.05 = sum(gsea_res$padj < 0.05, na.rm = TRUE),
+    Top_up_pathway = gsea_res[order(padj, -NES)][NES > 0][1]$pathway_name,
+    Top_down_pathway = gsea_res[order(padj, NES)][NES < 0][1]$pathway_name
   )
 )
-fwrite(summary_table, "results/analysis_summary.tsv", sep = "\t")
+file.copy(
+  "results/psoriasis_lesional_vs_healthy_analysis_summary.tsv",
+  "results/analysis_summary.tsv",
+  overwrite = TRUE
+)
+
+write_metric_summary(
+  "results/psoriasis_lesional_vs_nonlesional_analysis_summary.tsv",
+  c(
+    cohort_id = "gse121212_psoriasis_paired",
+    dataset_identifier = "GSE121212",
+    contrast_name = "PSO_lesional_vs_nonlesional",
+    condition_a = "Psoriasis non-lesional skin",
+    condition_b = "Psoriasis lesion",
+    contrast_samples_total = nrow(paired_sample_md),
+    condition_a_samples = sum(paired_sample_md$contrast_group == "A"),
+    condition_b_samples = sum(paired_sample_md$contrast_group == "B"),
+    tested_genes_paired = nrow(res_paired_df),
+    DEGs_FDR_lt_0.05_absLFC_gt_1 = sum(res_paired_df$padj < 0.05 & abs(res_paired_df$log2FoldChange) > 1, na.rm = TRUE),
+    Reactome_pathways_FDR_lt_0.05 = sum(gsea_paired$padj < 0.05, na.rm = TRUE),
+    Top_up_pathway = gsea_paired[order(padj, -NES)][NES > 0][1]$pathway_name,
+    Top_down_pathway = gsea_paired[order(padj, NES)][NES < 0][1]$pathway_name
+  )
+)
+
+write_metric_summary(
+  "results/atopic_dermatitis_lesional_vs_healthy_analysis_summary.tsv",
+  c(
+    cohort_id = "gse121212_atopic_dermatitis_primary",
+    dataset_identifier = "GSE121212",
+    contrast_name = "AD_lesional_vs_CTRL_healthy",
+    condition_a = "Healthy skin",
+    condition_b = "Atopic dermatitis lesion",
+    contrast_samples_total = nrow(ad_sample_md),
+    condition_a_samples = sum(ad_sample_md$contrast_group == "A"),
+    condition_b_samples = sum(ad_sample_md$contrast_group == "B"),
+    tested_genes = nrow(res_ad_df),
+    DEGs_FDR_lt_0.05_absLFC_gt_1 = sum(res_ad_df$padj < 0.05 & abs(res_ad_df$log2FoldChange) > 1, na.rm = TRUE),
+    Reactome_pathways_FDR_lt_0.05 = sum(gsea_ad$padj < 0.05, na.rm = TRUE),
+    Top_up_pathway = gsea_ad[order(padj, -NES)][NES > 0][1]$pathway_name,
+    Top_down_pathway = gsea_ad[order(padj, NES)][NES < 0][1]$pathway_name
+  )
+)

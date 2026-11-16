@@ -1,0 +1,58 @@
+{
+  "cohortKey": "gse102556_mdd_extension",
+  "datasetIdentifier": "GSE102556",
+  "projectTitle": "Major depressive disorder dorsolateral prefrontal cortex versus control",
+  "contrastName": "MDD_vs_control_dlPFC",
+  "conditionA": "Control",
+  "conditionB": "Major depressive disorder",
+  "contrastDefinition": "Human dorsolateral prefrontal cortex (BA8/9) bulk RNA-seq from major depressive disorder versus unaffected control donors",
+  "sampleGroupSource": "Human-only GPL11154 series matrix subset restricted to dlPFC samples; contrast labels parsed from `phenotype` in GEO sample characteristics.",
+  "batchHandlingRule": "DESeq2 design = ~ gender + age + pmi + ph + rin + group on the human dlPFC subset; medication and smoking fields omitted because of missingness.",
+  "notes": "Mental-health extension cohort. Uses the human GPL11154 arm only and excludes mouse GPL13112 samples entirely.",
+  "rawCountsUrl": "https://www.ncbi.nlm.nih.gov/geo/download/?type=rnaseq_counts&acc=GSE102556&format=file&file=GSE102556_raw_counts_GRCh38.p13_NCBI.tsv.gz",
+  "seriesMatrixUrl": "https://ftp.ncbi.nlm.nih.gov/geo/series/GSE102nnn/GSE102556/matrix/GSE102556-GPL11154_series_matrix.txt.gz",
+  "rawCountsPath": "data/raw/GSE102556_raw_counts_GRCh38.p13_NCBI.tsv.gz",
+  "seriesMatrixPath": "data/raw/GSE102556-GPL11154_series_matrix.txt.gz",
+  "resultPrefix": "gse102556_mdd_vs_control_dlpfc",
+  "figurePrefix": "gse102556_mdd_extension",
+  "designFormula": "~ gender + age + pmi + ph + rin + group",
+  "numericCovariates": [
+    "age",
+    "pmi",
+    "ph",
+    "rin"
+  ],
+  "includeFilters": [
+    {
+      "source": "title_clean",
+      "pattern": "Dorsolateral prefrontal cortex"
+    }
+  ],
+  "groupRules": [
+    {
+      "group": "A",
+      "source": "phenotype",
+      "pattern": "^CTRL$"
+    },
+    {
+      "group": "B",
+      "source": "phenotype",
+      "pattern": "^MDD$"
+    }
+  ],
+  "filterMinCount": 10,
+  "filterMinFraction": 0.15,
+  "figureTitles": {
+    "pca": "dlPFC control and MDD samples separate in human bulk RNA-seq space",
+    "volcano": "Differential expression in human dlPFC major depressive disorder versus control",
+    "pathway": "Reactome pathways altered in human dlPFC major depressive disorder"
+  },
+  "seed": 20261110,
+  "camera": true,
+  "referencePath": "data/reference/ReactomePathways.gmt.zip",
+  "bootstrapReplicates": 500,
+  "outputDir": "paper/outputs/publication_v2/gse102556_mdd_extension",
+  "writeFigures": false,
+  "bootstrapWorkers": 4,
+  "bootstrapCheckpointDir": ".cache/bootstrap/publication-v2"
+}

@@ -7,9 +7,10 @@ cran_packages <- c(
   "jsonlite",
   "patchwork",
   "pheatmap",
-  "writexl"
+  "writexl",
+  "digest"
 )
-bioc_packages <- c("DESeq2", "fgsea")
+bioc_packages <- c("DESeq2", "apeglm", "fgsea", "edgeR", "limma", "airway")
 
 install_if_missing <- function(packages, installer) {
   missing <- packages[!vapply(packages, requireNamespace, quietly = TRUE, FUN.VALUE = logical(1))]

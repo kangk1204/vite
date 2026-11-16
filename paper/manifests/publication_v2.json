@@ -1,0 +1,217 @@
+{
+  "manifestVersion": 2,
+  "reportSchemaVersion": 2,
+  "outputRoot": "paper/outputs/publication_v2",
+  "primaryCohortKey": "gse68719_pd_primary",
+  "notes": [
+    "Publication v2: all tested pathways, preserved Wald inference, apeglm effects, CAMERA sensitivity and 500 sample bootstrap runs for PD/MDD.",
+    "Cross-disease comparisons are descriptive; no independent disease-replication claim.",
+    "Use scripts/finalize_publication_v2.mjs to finalize captured outputs without rerunning the R fits."
+  ],
+  "jobs": [
+    {
+      "key": "gse68719_pd_case_study",
+      "description": "Publication v2 gse68719_pd_primary",
+      "command": [
+        "Rscript",
+        "scripts/analyze_neural_bulk_cohort.R",
+        "paper/configs/publication_v2/gse68719_pd_primary.json"
+      ]
+    },
+    {
+      "key": "gse159699_ad_case_study",
+      "description": "Publication v2 gse159699_ad_replication",
+      "command": [
+        "Rscript",
+        "scripts/analyze_neural_bulk_cohort.R",
+        "paper/configs/publication_v2/gse159699_ad_replication.json"
+      ]
+    },
+    {
+      "key": "gse102556_mdd_case_study",
+      "description": "Publication v2 gse102556_mdd_extension",
+      "command": [
+        "Rscript",
+        "scripts/analyze_neural_bulk_cohort.R",
+        "paper/configs/publication_v2/gse102556_mdd_extension.json"
+      ]
+    },
+    {
+      "key": "gse290452_akap11_model_case_study",
+      "description": "Publication v2 gse290452_akap11_model_extension",
+      "command": [
+        "Rscript",
+        "scripts/analyze_neural_bulk_cohort.R",
+        "paper/configs/publication_v2/gse290452_akap11_model_extension.json"
+      ]
+    },
+    {
+      "key": "airway_paired_reference",
+      "description": "Paired human airway integration reference",
+      "prepareCommands": [
+        [
+          "Rscript",
+          "scripts/prepare_airway_case.R",
+          "paper/outputs/publication_v2/airway_paired_reference"
+        ]
+      ],
+      "command": [
+        "Rscript",
+        "scripts/run_local_analysis.R",
+        "paper/configs/publication_v2/airway_paired_reference.json"
+      ]
+    }
+  ],
+  "cohorts": [
+    {
+      "key": "gse68719_pd_primary",
+      "enabled": true,
+      "jobKey": "gse68719_pd_case_study",
+      "datasetIdentifier": "GSE68719",
+      "diseaseArea": "parkinson_disease",
+      "role": "primary",
+      "sampleCount": 73,
+      "contrastName": "PD_vs_control",
+      "contrastDefinition": "Parkinson disease BA9 postmortem brain tissue versus neurologically normal control BA9 tissue",
+      "sampleGroupSource": "Parsed from GEO sample titles (`C_*` controls, `P_*` Parkinson disease) together with GEO sample characteristics.",
+      "batchHandlingRule": "DESeq2 design = ~ post_mortem_interval_pmi + age_at_death + rna_integrity_number_rin + group; no additional batch factor.",
+      "notes": "Primary neural manuscript cohort.",
+      "workbookPath": "paper/outputs/publication_v2/gse68719_pd_primary/gse68719_pd_vs_control_pathway_viewer_input.xlsx",
+      "reportPath": "paper/outputs/publication_v2/reports/gse68719_pd_primary.report.html",
+      "degTablePath": "paper/outputs/publication_v2/gse68719_pd_primary/gse68719_pd_vs_control_deseq2.tsv",
+      "pathwayTablePath": "paper/outputs/publication_v2/gse68719_pd_primary/gse68719_pd_vs_control_fgsea_reactome.tsv",
+      "summaryTablePath": "paper/outputs/publication_v2/gse68719_pd_primary/gse68719_pd_vs_control_analysis_summary.tsv",
+      "sampleMetadataPath": "paper/outputs/publication_v2/gse68719_pd_primary/gse68719_pd_vs_control_sample_metadata.tsv",
+      "figurePaths": [],
+      "configPath": "paper/configs/publication_v2/gse68719_pd_primary.json",
+      "evidencePath": "paper/outputs/publication_v2/gse68719_pd_primary/gse68719_pd_vs_control_evidence.json",
+      "referenceInputPath": "paper/outputs/publication_v2/gse68719_pd_primary/gse68719_pd_vs_control_reference_input.rds"
+    },
+    {
+      "key": "gse159699_ad_replication",
+      "enabled": true,
+      "jobKey": "gse159699_ad_case_study",
+      "datasetIdentifier": "GSE159699",
+      "diseaseArea": "alzheimers_disease",
+      "role": "cross_context",
+      "sampleCount": 22,
+      "contrastName": "AD_vs_old_control",
+      "contrastDefinition": "Alzheimer disease lateral temporal lobe bulk RNA-seq versus age-matched old control tissue",
+      "sampleGroupSource": "Parsed from GEO sample titles (`*-Old` controls, `*-AD` Alzheimer disease); `Young` samples are excluded from the manuscript contrast.",
+      "batchHandlingRule": "DESeq2 design = ~ group; no explicit batch or age covariate is available for the AD samples in the series matrix.",
+      "notes": "Neural replication cohort.",
+      "workbookPath": "paper/outputs/publication_v2/gse159699_ad_replication/gse159699_ad_vs_old_control_pathway_viewer_input.xlsx",
+      "reportPath": "paper/outputs/publication_v2/reports/gse159699_ad_replication.report.html",
+      "degTablePath": "paper/outputs/publication_v2/gse159699_ad_replication/gse159699_ad_vs_old_control_deseq2.tsv",
+      "pathwayTablePath": "paper/outputs/publication_v2/gse159699_ad_replication/gse159699_ad_vs_old_control_fgsea_reactome.tsv",
+      "summaryTablePath": "paper/outputs/publication_v2/gse159699_ad_replication/gse159699_ad_vs_old_control_analysis_summary.tsv",
+      "sampleMetadataPath": "paper/outputs/publication_v2/gse159699_ad_replication/gse159699_ad_vs_old_control_sample_metadata.tsv",
+      "figurePaths": [],
+      "configPath": "paper/configs/publication_v2/gse159699_ad_replication.json",
+      "evidencePath": "paper/outputs/publication_v2/gse159699_ad_replication/gse159699_ad_vs_old_control_evidence.json",
+      "referenceInputPath": "paper/outputs/publication_v2/gse159699_ad_replication/gse159699_ad_vs_old_control_reference_input.rds"
+    },
+    {
+      "key": "gse102556_mdd_extension",
+      "enabled": true,
+      "jobKey": "gse102556_mdd_case_study",
+      "datasetIdentifier": "GSE102556",
+      "diseaseArea": "major_depressive_disorder",
+      "role": "extension",
+      "sampleCount": 48,
+      "contrastName": "MDD_vs_control_dlPFC",
+      "contrastDefinition": "Human dorsolateral prefrontal cortex (BA8/9) bulk RNA-seq from major depressive disorder versus unaffected control donors",
+      "sampleGroupSource": "Human-only GPL11154 series matrix subset restricted to dlPFC samples; contrast labels parsed from `phenotype` in GEO sample characteristics.",
+      "batchHandlingRule": "DESeq2 design = ~ gender + age + pmi + ph + rin + group on the human dlPFC subset; medication and smoking fields omitted because of missingness.",
+      "notes": "Mental-health extension cohort activated from the human-only dlPFC subset.",
+      "workbookPath": "paper/outputs/publication_v2/gse102556_mdd_extension/gse102556_mdd_vs_control_dlpfc_pathway_viewer_input.xlsx",
+      "reportPath": "paper/outputs/publication_v2/reports/gse102556_mdd_extension.report.html",
+      "degTablePath": "paper/outputs/publication_v2/gse102556_mdd_extension/gse102556_mdd_vs_control_dlpfc_deseq2.tsv",
+      "pathwayTablePath": "paper/outputs/publication_v2/gse102556_mdd_extension/gse102556_mdd_vs_control_dlpfc_fgsea_reactome.tsv",
+      "summaryTablePath": "paper/outputs/publication_v2/gse102556_mdd_extension/gse102556_mdd_vs_control_dlpfc_analysis_summary.tsv",
+      "sampleMetadataPath": "paper/outputs/publication_v2/gse102556_mdd_extension/gse102556_mdd_vs_control_dlpfc_sample_metadata.tsv",
+      "figurePaths": [],
+      "configPath": "paper/configs/publication_v2/gse102556_mdd_extension.json",
+      "evidencePath": "paper/outputs/publication_v2/gse102556_mdd_extension/gse102556_mdd_vs_control_dlpfc_evidence.json",
+      "referenceInputPath": "paper/outputs/publication_v2/gse102556_mdd_extension/gse102556_mdd_vs_control_dlpfc_reference_input.rds"
+    },
+    {
+      "key": "gse290452_akap11_model_extension",
+      "enabled": true,
+      "jobKey": "gse290452_akap11_model_case_study",
+      "datasetIdentifier": "GSE290452",
+      "diseaseArea": "bipolar_schizophrenia_risk_model",
+      "role": "orthogonal_extension",
+      "sampleCount": 6,
+      "contrastName": "AKAP11_HetKO_vs_WT_UNT",
+      "contrastDefinition": "Human iPSC-derived neuronal glial culture with heterozygous AKAP11 knockout versus wild-type control in the untreated state",
+      "sampleGroupSource": "Parsed from GEO sample characteristics (`genotype`, `treatment`) and aligned to submitter-supplied raw-count headers by sample title.",
+      "batchHandlingRule": "Restrict to untreated samples only, then fit DESeq2 with design = ~ group.",
+      "notes": "Orthogonal psychiatric-risk model extension cohort using submitter raw counts rather than NCBI-generated counts.",
+      "workbookPath": "paper/outputs/publication_v2/gse290452_akap11_model_extension/gse290452_akap11_hetko_vs_wt_unt_pathway_viewer_input.xlsx",
+      "reportPath": "paper/outputs/publication_v2/reports/gse290452_akap11_model_extension.report.html",
+      "degTablePath": "paper/outputs/publication_v2/gse290452_akap11_model_extension/gse290452_akap11_hetko_vs_wt_unt_deseq2.tsv",
+      "pathwayTablePath": "paper/outputs/publication_v2/gse290452_akap11_model_extension/gse290452_akap11_hetko_vs_wt_unt_fgsea_reactome.tsv",
+      "summaryTablePath": "paper/outputs/publication_v2/gse290452_akap11_model_extension/gse290452_akap11_hetko_vs_wt_unt_analysis_summary.tsv",
+      "sampleMetadataPath": "paper/outputs/publication_v2/gse290452_akap11_model_extension/gse290452_akap11_hetko_vs_wt_unt_sample_metadata.tsv",
+      "figurePaths": [],
+      "configPath": "paper/configs/publication_v2/gse290452_akap11_model_extension.json",
+      "evidencePath": "paper/outputs/publication_v2/gse290452_akap11_model_extension/gse290452_akap11_hetko_vs_wt_unt_evidence.json",
+      "referenceInputPath": "paper/outputs/publication_v2/gse290452_akap11_model_extension/gse290452_akap11_hetko_vs_wt_unt_reference_input.rds"
+    },
+    {
+      "key": "airway_paired_reference",
+      "enabled": true,
+      "jobKey": "airway_paired_reference",
+      "datasetIdentifier": "GSE52778 (airway subset)",
+      "diseaseArea": "controlled_perturbation",
+      "role": "paired_implementation_reference",
+      "sampleCount": 8,
+      "contrastName": "dexamethasone_vs_untreated",
+      "contrastDefinition": "Dexamethasone versus untreated paired within four human airway smooth-muscle donors",
+      "sampleGroupSource": "airway package colData; each of four donors contributes one untreated and one treated sample.",
+      "batchHandlingRule": "DESeq2 design = ~ donor + group",
+      "notes": "Paired implementation reference; not a new biological finding.",
+      "configPath": "paper/configs/publication_v2/airway_paired_reference.json",
+      "workbookPath": "paper/outputs/publication_v2/airway_paired_reference/results/airway_paired_pathway_viewer_input.xlsx",
+      "evidencePath": "paper/outputs/publication_v2/airway_paired_reference/results/airway_paired_evidence.json",
+      "degTablePath": "paper/outputs/publication_v2/airway_paired_reference/results/airway_paired_deseq2.tsv",
+      "pathwayTablePath": "paper/outputs/publication_v2/airway_paired_reference/results/airway_paired_fgsea_reactome.tsv",
+      "summaryTablePath": "paper/outputs/publication_v2/airway_paired_reference/results/airway_paired_analysis_summary.tsv",
+      "sampleMetadataPath": "paper/outputs/publication_v2/airway_paired_reference/results/airway_paired_sample_metadata.tsv",
+      "referenceInputPath": "paper/outputs/publication_v2/airway_paired_reference/results/airway_paired_reference_input.rds",
+      "reportPath": "paper/outputs/publication_v2/reports/airway_paired_reference.report.html",
+      "figurePaths": []
+    }
+  ],
+  "ablations": [
+    {
+      "cohortKey": "gse68719_pd_primary",
+      "ablationName": "group_only_same_samples",
+      "patch": {
+        "designFormula": "~ group",
+        "numericCovariates": [],
+        "resultPrefix": "gse68719_pd_vs_control_group_only",
+        "outputDir": "paper/outputs/publication_v2/ablations/gse68719_pd_primary",
+        "projectTitle": "Parkinson disease BA9 brain versus neurologically normal control brain: group-only sensitivity",
+        "bootstrapReplicates": 0,
+        "writeFigures": false,
+        "notes": "Preserves the primary included sample set; group-only sensitivity is descriptive and is not selected by yield."
+      }
+    },
+    {
+      "cohortKey": "gse102556_mdd_extension",
+      "ablationName": "group_only_same_samples",
+      "patch": {
+        "designFormula": "~ group",
+        "numericCovariates": [],
+        "resultPrefix": "gse102556_mdd_vs_control_dlpfc_group_only",
+        "outputDir": "paper/outputs/publication_v2/ablations/gse102556_mdd_extension",
+        "projectTitle": "Major depressive disorder dorsolateral prefrontal cortex versus control: group-only sensitivity",
+        "bootstrapReplicates": 0,
+        "writeFigures": false,
+        "notes": "Preserves the primary included sample set; group-only sensitivity is descriptive and is not selected by yield."
+      }
+    }
+  ]
+}

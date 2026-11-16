@@ -1,0 +1,55 @@
+{
+  "cohortKey": "gse290452_akap11_model_extension",
+  "datasetIdentifier": "GSE290452",
+  "projectTitle": "AKAP11 heterozygous knockout neuronal culture versus wild-type untreated state",
+  "contrastName": "AKAP11_HetKO_vs_WT_UNT",
+  "conditionA": "Wild-type untreated",
+  "conditionB": "AKAP11 heterozygous knockout untreated",
+  "contrastDefinition": "Human iPSC-derived neuronal glial culture with heterozygous AKAP11 knockout versus wild-type control in the untreated state",
+  "sampleGroupSource": "Parsed from GEO sample characteristics (`genotype`, `treatment`) and aligned to submitter-supplied raw-count headers by sample title.",
+  "batchHandlingRule": "Restrict to untreated samples only, then fit DESeq2 with design = ~ group.",
+  "notes": "Orthogonal psychiatric-risk model extension cohort using submitter raw counts rather than NCBI-generated counts.",
+  "rawCountsUrl": "https://ftp.ncbi.nlm.nih.gov/geo/series/GSE290nnn/GSE290452/suppl/GSE290452_raw_counts.tsv.gz",
+  "seriesMatrixUrl": "https://ftp.ncbi.nlm.nih.gov/geo/series/GSE290nnn/GSE290452/matrix/GSE290452_series_matrix.txt.gz",
+  "rawCountsPath": "data/raw/GSE290452_raw_counts.tsv.gz",
+  "seriesMatrixPath": "data/raw/GSE290452_series_matrix.txt.gz",
+  "resultPrefix": "gse290452_akap11_hetko_vs_wt_unt",
+  "figurePrefix": "gse290452_akap11_model_extension",
+  "designFormula": "~ group",
+  "geneIdentifierType": "symbol",
+  "sampleAlignmentFields": [
+    "title_clean",
+    "title",
+    "sample"
+  ],
+  "includeFilters": [
+    {
+      "source": "treatment",
+      "pattern": "^Untreated$"
+    }
+  ],
+  "numericCovariates": [],
+  "groupRules": [
+    {
+      "group": "A",
+      "source": "genotype",
+      "pattern": "^WT$"
+    },
+    {
+      "group": "B",
+      "source": "genotype",
+      "pattern": "^Het_AKAP11-KO$"
+    }
+  ],
+  "filterMinCount": 10,
+  "filterMinFraction": 0.15,
+  "figureTitles": {
+    "pca": "Untreated AKAP11 heterozygous knockout and wild-type neuronal cultures diverge in expression space",
+    "volcano": "Differential expression in untreated AKAP11 heterozygous knockout neuronal cultures versus wild-type",
+    "pathway": "Reactome pathways altered by untreated AKAP11 heterozygous knockout in neuronal cultures"
+  },
+  "seed": 20261110,
+  "camera": true,
+  "referencePath": "data/reference/ReactomePathways.gmt.zip",
+  "bootstrapReplicates": 0
+}

@@ -57,6 +57,19 @@ function makeResult(): WorkbookParseResult {
 }
 
 describe('draftAnalysisReducer', () => {
+  it('imports an independent result without attaching it to an unrelated design draft', () => {
+    const draft = draftAnalysisReducer(createInitialDraftAnalysisState(), {
+      type: 'setup_session', session: createDesignSession(makePreview(), 'files'), loadedFileName: 'draft counts',
+    });
+    const result = makeResult();
+    const imported = draftAnalysisReducer(draft, { type: 'import_result', result, loadedFileName: 'local.viewer.json' });
+    expect(imported.designSession).toBeNull();
+    expect(imported.result).toBe(result);
+    expect(imported.loadedFileName).toBe('local.viewer.json');
+    expect(imported.isDirtySinceLastRun).toBe(false);
+    expect(draft.designSession).not.toBeNull();
+  });
+
   it('marks analysis results stale after design edits', () => {
     const session = createDesignSession(makePreview(), 'ncbi');
     let state = createInitialDraftAnalysisState();
@@ -72,6 +85,7 @@ describe('draftAnalysisReducer', () => {
     });
 
     expect(state.isDirtySinceLastRun).toBe(false);
+    expect(state.groupCounts).toEqual({ A: 2, B: 2, excluded: 0 });
 
     state = draftAnalysisReducer(state, {
       type: 'set_condition_label',
@@ -102,6 +116,7 @@ describe('draftAnalysisReducer', () => {
     });
 
     expect(state.isDirtySinceLastRun).toBe(true);
+    expect(state.groupCounts).toEqual({ A: 2, B: 1, excluded: 1 });
 
     state = draftAnalysisReducer(state, {
       type: 'set_analysis_result',
@@ -110,5 +125,28 @@ describe('draftAnalysisReducer', () => {
     });
 
     expect(state.isDirtySinceLastRun).toBe(false);
+  });
+
+  it('updates groupCounts incrementally when assigning filtered groups', () => {
+    const session = createDesignSession(makePreview(), 'ncbi');
+    let state = draftAnalysisReducer(createInitialDraftAnalysisState(), {
+      type: 'setup_session',
+      session,
+      loadedFileName: 'GSE100 (setup ready)',
+    });
+
+    state = draftAnalysisReducer(state, {
+      type: 'assign_filtered_group',
+      sampleIds: ['S1', 'S3'],
+      value: '',
+    });
+    expect(state.groupCounts).toEqual({ A: 1, B: 1, excluded: 2 });
+
+    state = draftAnalysisReducer(state, {
+      type: 'assign_filtered_group',
+      sampleIds: ['S4'],
+      value: 'A',
+    });
+    expect(state.groupCounts).toEqual({ A: 2, B: 0, excluded: 2 });
   });
 });

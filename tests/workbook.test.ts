@@ -1,10 +1,44 @@
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import * as XLSX from 'xlsx';
-import { parseWorkbookBuffer } from '../src/lib/workbook';
-import huriAdjacency from '../src/reference/generated/huri.json';
+import { ensureWorkbookRuntimeReady, parseWorkbookBuffer, parseWorkbookFile, parseWorkbookRows } from '../src/lib/workbook';
+import type { WorkbookSheetRowsInput } from '../src/lib/workbook';
+import { getLoadedReferenceAssetsOrThrow } from '../src/reference/assets';
+
+const ASSET_HEAVY_TEST_TIMEOUT_MS = 30_000;
+
+describe('workbook byte budget', () => {
+  it('rejects a buffer larger than 64 MiB with the same documented limit', () => {
+    expect(() => parseWorkbookBuffer(new ArrayBuffer(64 * 1024 * 1024 + 1))).toThrow(/64 MiB or smaller/);
+  });
+  it('rejects an oversized browser File before reading its bytes', async () => {
+    const file = new File([], 'oversized.xlsx'), read = vi.fn();
+    Object.defineProperty(file, 'size', {value: 64 * 1024 * 1024 + 1});
+    Object.defineProperty(file, 'arrayBuffer', {value: read});
+    await expect(parseWorkbookFile(file)).rejects.toThrow(/64 MiB or smaller/);
+    expect(read).not.toHaveBeenCalled();
+  });
+});
+
+function identityRows(sampleIds: string[]): WorkbookSheetRowsInput {
+  return {
+    projectRows: [{ project_title: 'Exact sample identity', contrast_name: 'B_vs_A', condition_a: 'Control', condition_b: 'Treatment' }],
+    genesRows: [{ gene_symbol: 'TP53', log2fc: 1, padj: 0.2, pvalue: 0.1, rank_metric: 2, condition_a_mean: 11, condition_b_mean: 99,
+      [`sample_${sampleIds[0]}`]: 11, [`sample_${sampleIds[1]}`]: 99 }],
+    pathwayRows: [{ pathway_name: 'Custom pathway', collection: 'Custom', nes: 1.2, padj: 0.2, leading_edge_genes: 'TP53' }],
+    sampleRows: sampleIds.map((sample_id, index) => ({ sample_id, label: index ? 'Treatment sample' : 'Control sample', group: index ? 'B' : 'A' })),
+  };
+}
+
+function workbookFromRows(rows: WorkbookSheetRowsInput): ArrayBuffer {
+  const workbook = XLSX.utils.book_new();
+  for (const [name, data] of [['Project', rows.projectRows], ['Genes', rows.genesRows], ['Pathways', rows.pathwayRows], ['Samples', rows.sampleRows ?? []]] as const) {
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(data), name);
+  }
+  return XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
+}
 
 function pickAnyHuriGenePair(): [string, string] {
-  const adjacency = huriAdjacency as unknown as Record<string, Array<[string, number | string]>>;
+  const adjacency = getLoadedReferenceAssetsOrThrow().huriAdjacency as Record<string, Array<[string, number]>>;
   for (const [source, neighbors] of Object.entries(adjacency)) {
     const neighbor = neighbors?.[0]?.[0];
     if (typeof neighbor === 'string' && neighbor) {
@@ -71,12 +105,350 @@ function buildWorkbookBuffer(): ArrayBuffer {
 }
 
 describe('parseWorkbookBuffer', () => {
+  beforeAll(async () => {
+    await ensureWorkbookRuntimeReady();
+  }, ASSET_HEAVY_TEST_TIMEOUT_MS);
+
+  it('reads a valid browser File through the shared workbook parser', async () => {
+    const buffer = workbookFromRows(identityRows(['A1', 'B1']));
+    const file = new File([buffer], 'result.xlsx'), read = vi.fn(async () => buffer);
+    Object.defineProperty(file, 'arrayBuffer', {value:read});
+    const result = await parseWorkbookFile(file);
+    expect(read).toHaveBeenCalledOnce();
+    expect(result.viewerData?.pathways[0].nes).toBe(1.2);
+  });
+
+  it.each(['missing_sheets', 'project_columns', 'empty_project', 'gene_columns', 'pathway_columns'])('rejects incomplete workbook metadata %s', kind => {
+    const rows = identityRows(['A1', 'B1']);
+    if (kind === 'missing_sheets') { rows.projectRows = []; rows.genesRows = []; }
+    if (kind === 'project_columns') rows.projectRows = [{project_title:'Incomplete'}];
+    if (kind === 'empty_project') rows.projectRows = [{project_title:'',contrast_name:'',condition_a:'',condition_b:''}];
+    if (kind === 'gene_columns') delete rows.genesRows[0].rank_metric;
+    if (kind === 'pathway_columns') delete rows.pathwayRows[0].nes;
+    const result = parseWorkbookRows(rows);
+    expect(result.viewerData).toBeNull();
+    expect(result.issues.some(issue => issue.level === 'error')).toBe(true);
+  });
+
+  it('rejects prototype keys and unsafe sample IDs at the metadata boundary', () => {
+    const rows = identityRows(['A1', 'B1']);
+    rows.genesRows[0] = JSON.parse(JSON.stringify(rows.genesRows[0]).replace(/}$/, ',"__proto__":17}'));
+    expect(parseWorkbookRows(rows).issues.some(issue => /Unsafe column/.test(issue.message))).toBe(true);
+    const samples = identityRows(['A1', 'B1']);
+    samples.sampleRows![0].sample_id = 'constructor';
+    expect(parseWorkbookRows(samples).viewerData).toBeNull();
+    expect(Object.prototype).not.toHaveProperty('rank_metric');
+  });
+
+  it('preserves alternate sample identity, group, title and batch fields', () => {
+    const rows = identityRows(['A1', 'B1']);
+    rows.sampleRows = [{sample:'A1',sample_group:'A',title:'Reference',batch_id:'Batch A'},
+      {id:'B1',condition:'B',label:'',group_label:'Treatment',batch:'Batch B'}, {id:'U1',group:'U'}, {id:''}];
+    const data = parseWorkbookRows(rows).viewerData!;
+    expect(data.samplesById?.sample_A1).toMatchObject({groupKey:'A',label:'Reference',batch:'Batch A'});
+    expect(data.samplesById?.sample_B1).toMatchObject({groupKey:'B',label:'B1',groupLabel:'Treatment',batch:'Batch B'});
+    expect(data.samplesById?.U1.groupKey).toBe('U');
+  });
+
+  it('merges gene-centric sample rows and excludes absent genes and nonnumeric cells', () => {
+    const rows = identityRows(['A1', 'B1']);
+    rows.sampleRows!.push({gene_symbol:'TP53',sample_A1:42,sample_C1:7,invalid:'NA'},
+      {gene_symbol:'CDKN1A',sample_C1:99},{gene_symbol:'FAKE_UNMAPPED',sample_C1:88});
+    const data = parseWorkbookRows(rows).viewerData!;
+    expect(data.pathways[0].nodes[0].sampleValues).toEqual({sample_A1:42,sample_B1:99,sample_C1:7});
+    expect(data.samplesById?.sample_A1.groupKey).toBe('A');
+    expect(data.samplesById).not.toHaveProperty('invalid');
+  });
+
+  it('caps supplemental sample columns while allowing an existing sample value to update', () => {
+    const rows = identityRows(['A1', 'B1']);
+    Object.assign(rows.genesRows[0],Object.fromEntries(Array.from({length:158},(_,i)=>['extra_'+i,i])));
+    rows.sampleRows!.push({gene_symbol:'TP53',sample_A1:42,sample_overflow:99});
+    const result = parseWorkbookRows(rows), values = result.viewerData!.pathways[0].nodes[0].sampleValues;
+    expect(Object.keys(values)).toHaveLength(160);
+    expect(values.sample_A1).toBe(42);
+    expect(values).not.toHaveProperty('sample_overflow');
+    expect(result.issues.some(issue => /exceeded 160/.test(issue.message))).toBe(true);
+  });
+
+  it('combines custom interactions and labels while rejecting invalid interaction rows', () => {
+    const rows = identityRows(['A1', 'B1']);
+    rows.genesRows.push({...rows.genesRows[0],gene_symbol:'CDKN1A'},{...rows.genesRows[0],gene_symbol:'MDM2'});
+    rows.pathwayRows[0].leading_edge_genes = 'TP53;CDKN1A;MDM2';
+    rows.labelRows = [{gene_symbol:'TP53',label:'Protein p53',priority:7},{gene_symbol:'CDKN1A',label:'',priority:''},{gene_symbol:'FAKE_UNMAPPED',label:'Ignore'}];
+    rows.customPpiRows = [{gene_a:'TP53',gene_b:'CDKN1A',score:950},{gene_a:'TP53',gene_b:'MDM2',score:990},
+      {gene_a:'CDKN1A',gene_b:'MDM2',score:800},{gene_a:'BAX',gene_b:'MDM2',score:900},
+      {gene_a:'TP53',gene_b:'TP53',score:900},{gene_a:'UNKNOWN_X',gene_b:'TP53',score:900},{gene_a:'TP53',gene_b:'MDM2',score:'NA'}];
+    const result = parseWorkbookRows(rows), pathway = result.viewerData!.pathways[0];
+    expect(pathway.nodes.find(node => node.id === 'TP53')).toMatchObject({label:'Protein p53',labelPriority:7});
+    expect(pathway.nodes.find(node => node.id === 'CDKN1A')?.label).toBe('CDKN1A');
+    expect(pathway.edges.filter(edge => edge.isCustom)).toHaveLength(3);
+    expect(pathway.edges.some(edge => [edge.source,edge.target].includes('BAX'))).toBe(false);
+    expect(result.issues.filter(issue => /Invalid CustomPPI/.test(issue.message))).toHaveLength(3);
+  });
+
+  it('retains supplied pathway statistics when every named member is absent from the gene table', () => {
+    const rows = identityRows(['A1', 'B1']);
+    rows.pathwayRows[0].leading_edge_genes = 'CDKN1A;UNKNOWN_X';
+    rows.pathwayRows.push({...rows.pathwayRows[0],pathway_name:''});
+    const result = parseWorkbookRows(rows), pathway = result.viewerData!.pathways[0];
+    expect(result.viewerData!.pathways).toHaveLength(1);
+    expect(pathway.nodes).toEqual([]);
+    expect([pathway.nes,pathway.padj]).toEqual([1.2,0.2]);
+    expect(pathway.missingGenes).toEqual(['CDKN1A']);
+    expect(pathway.enrichment.es).toBeNull();
+  });
+
+  for (const route of ['rows', 'xlsx'] as const) {
+    const parse = (rows: WorkbookSheetRowsInput) => route === 'rows' ? parseWorkbookRows(rows) : parseWorkbookBuffer(workbookFromRows(rows));
+
+    it.each([['A1', 'a1'], ['A-1', 'A_1']])(`preserves case/punctuation-distinct expression values, groups and source columns through ${route}`, (firstId, secondId) => {
+      const result = parse(identityRows([firstId, secondId]));
+      expect(result.viewerData).not.toBeNull();
+      const firstColumn = `sample_${firstId}`, secondColumn = `sample_${secondId}`;
+      expect(result.viewerData?.pathways[0].nodes[0].sampleValues).toEqual({ [firstColumn]: 11, [secondColumn]: 99 });
+      expect(result.viewerData?.samplesById?.[firstColumn].groupKey).toBe('A');
+      expect(result.viewerData?.samplesById?.[secondColumn].groupKey).toBe('B');
+      const source = result.viewerData!.evidence!.sourceTables!.Genes;
+      expect(Number(source.rows[0][source.columns.indexOf(firstColumn)])).toBe(11);
+      expect(Number(source.rows[0][source.columns.indexOf(secondColumn)])).toBe(99);
+    });
+
+    it(`rejects duplicate normalized statistic columns through ${route}`, () => {
+      const rows = identityRows(['A1', 'B1']);
+      rows.genesRows[0].Padj = 0.001;
+      const result = parse(rows);
+      expect(result.viewerData).toBeNull();
+      expect(result.issues.some(issue => issue.level === 'error' && /duplicate.*padj/i.test(issue.message))).toBe(true);
+    });
+
+    it(`rejects ambiguous sample aliases through ${route}`, () => {
+      const rows = identityRows(['A-1', 'A_1']);
+      delete rows.genesRows[0]['sample_A-1'];
+      delete rows.genesRows[0].sample_A_1;
+      rows.genesRows[0].sample_a_1 = 11;
+      const result = parse(rows);
+      expect(result.viewerData).toBeNull();
+      expect(result.issues.some(issue => issue.level === 'error' && /ambiguous.*sample/i.test(issue.message))).toBe(true);
+    });
+
+    it(`rejects duplicate sample metadata identities through ${route}`, () => {
+      const rows = identityRows(['A1', 'B1']);
+      rows.sampleRows![1].sample_id = 'A1';
+      const result = parse(rows);
+      expect(result.viewerData).toBeNull();
+      expect(result.issues.some(issue => /duplicate.*sample identifier/i.test(issue.message))).toBe(true);
+    });
+
+    it(`rejects conflicting literal and sample-prefixed identities through ${route}`, () => {
+      const result = parse(identityRows(['A1', 'sample_A1']));
+      expect(result.viewerData).toBeNull();
+      expect(result.issues.some(issue => /ambiguous.*sample/i.test(issue.message))).toBe(true);
+    });
+  }
+
+  it.each(['padj', 'sample_A1'])('rejects repeated physical Excel header %s before SheetJS renames it', (duplicate) => {
+    const rows = identityRows(['A1', 'B1']);
+    const workbook = XLSX.read(workbookFromRows(rows), { type: 'array' });
+    const columns = Object.keys(rows.genesRows[0]);
+    workbook.Sheets.Genes = XLSX.utils.aoa_to_sheet([[...columns, duplicate], [...columns.map(key => rows.genesRows[0][key]), 0.001]]);
+    const result = parseWorkbookBuffer(XLSX.write(workbook, { bookType: 'xlsx', type: 'array' }));
+    expect(result.viewerData).toBeNull();
+    expect(result.issues.some(issue => /duplicate/i.test(issue.message) && issue.message.includes(duplicate))).toBe(true);
+  });
+
+  it('preserves missing statistics as null and records the original source row', () => {
+    const result = parseWorkbookRows({
+      projectRows: [{ project_title: 'Null results', contrast_name: 'B_vs_A', condition_a: 'A', condition_b: 'B' }],
+      genesRows: [{ gene_symbol: 'TP53', log2fc: '', padj: '', pvalue: '', rank_metric: '', condition_a_mean: '', condition_b_mean: '' }],
+      pathwayRows: [{ pathway_name: 'Unestimated', collection: 'Custom', nes: '', padj: '', leading_edge_genes: 'TP53' }],
+    });
+    const pathway = result.viewerData?.pathways[0];
+    expect(pathway?.nes).toBeNull();
+    expect(pathway?.padj).toBeNull();
+    expect(pathway?.nodes[0].padj).toBeNull();
+    expect(pathway?.nodes[0].log2fc).toBeNull();
+    expect(pathway?.statisticsReason).toBeTruthy();
+    expect(pathway?.source).toEqual({ table: 'Pathways', row: 1 });
+    expect(result.viewerData?.evidence?.verification.status).toBe('unverifiable');
+    expect(result.summary.significantPathways).toBe(0);
+  });
+
+  it('returns an honest empty report when no pathways were tested', () => {
+    const result = parseWorkbookRows({
+      projectRows: [{ project_title: 'No pathways', contrast_name: 'B_vs_A', condition_a: 'A', condition_b: 'B' }],
+      genesRows: [{ gene_symbol: 'TP53', log2fc: 0, padj: 1, pvalue: 1, rank_metric: 0, condition_a_mean: 100, condition_b_mean: 100 }],
+      pathwayRows: [],
+    });
+    expect(result.viewerData).not.toBeNull();
+    expect(result.viewerData?.pathways).toEqual([]);
+    expect(result.issues.some(issue => issue.level === 'error')).toBe(false);
+  });
+
+  it('preserves original expression column names and links explicit sample groups without name inference', () => {
+    const result = parseWorkbookRows({
+      projectRows: [{ project_title: 'Sample identities', contrast_name: 'B_vs_A', condition_a: 'Control', condition_b: 'Treatment' }],
+      genesRows: [{ gene_symbol: 'TP53', log2fc: 1, padj: 0.02, pvalue: 0.01, rank_metric: 2, condition_a_mean: 1, condition_b_mean: 2, sample_SRR123: 1, sample_SRR456: 2 }],
+      pathwayRows: [],
+      sampleRows: [{ sample_id: 'SRR123', group: 'A', group_label: 'Control', batch: 'one' }, { sample_id: 'SRR456', group: 'B', group_label: 'Treatment', batch: 'two' }],
+    });
+    expect(result.viewerData?.samplesById?.sample_SRR123.groupKey).toBe('A');
+    expect(result.viewerData?.samplesById?.sample_SRR456.groupLabel).toBe('Treatment');
+    expect(result.viewerData?.samplesById?.sample_SRR456.batch).toBe('two');
+  });
+
+  it('retains unknown genes in the rank universe while omitting unsupported network nodes', () => {
+    const result = parseWorkbookRows({
+      projectRows: [{ project_title: 'Rank universe', contrast_name: 'B_vs_A', condition_a: 'A', condition_b: 'B' }],
+      genesRows: ['TP53', 'FAKEGENE123'].map((gene_symbol, index) => ({ gene_symbol, log2fc: 1, padj: 0.02, pvalue: 0.01, rank_metric: index ? -2 : 2, condition_a_mean: 1, condition_b_mean: 2 })),
+      pathwayRows: [{ pathway_name: 'Custom', collection: 'Custom', nes: 1, padj: 0.02, leading_edge_genes: 'TP53' }],
+    });
+    expect(result.viewerData?.rankedGenes?.map(gene => gene.gene)).toEqual(['TP53', 'FAKEGENE123']);
+    expect(result.viewerData?.pathways[0].enrichment).toMatchObject({ points: [], hitIndices: [], maxAbsValue: 0, es: null, validation: 'unavailable' });
+  });
+
+  it.each([
+    { pathway_name: 'Unknown custom', collection: 'Custom' },
+    { pathway_name: 'HALLMARK_UNMATCHED', collection: 'Hallmark' },
+    { pathway_name: 'Signaling by Interleukins', pathway_id: 'R-HSA-449147', collection: 'Reactome' },
+  ])('does not infer original membership from an imported $collection pathway', pathway => {
+    const result = parseWorkbookRows({
+      projectRows: [{ project_title: 'R2 four-gene reproduction', contrast_name: 'B_vs_A', condition_a: 'A', condition_b: 'B' }],
+      genesRows: ['TP53', 'CDKN1A', 'MDM2', 'BAX'].map((gene_symbol, index) => ({
+        gene_symbol, log2fc: 1, padj: 0.02, pvalue: 0.01, rank_metric: [4, 3, 2, -1][index], condition_a_mean: 1, condition_b_mean: 2,
+      })),
+      pathwayRows: [{ ...pathway, nes: 1.5, padj: 0.01, leading_edge_genes: 'TP53' }],
+    });
+    const imported = result.viewerData!.pathways[0];
+    expect([imported.nes, imported.padj]).toEqual([1.5, 0.01]);
+    expect(imported.enrichment).toMatchObject({ es: null, validation: 'unavailable', points: [], hitIndices: [] });
+    expect(imported.enrichment.unavailableReason).toMatch(/Original tested membership was not supplied/);
+  });
+
   it('parses a valid workbook and falls back to leading-edge genes when needed', () => {
     const result = parseWorkbookBuffer(buildWorkbookBuffer());
     expect(result.viewerData).not.toBeNull();
     expect(result.summary.totalGenes).toBe(2);
     expect(result.summary.totalPathways).toBe(1);
     expect(result.viewerData?.pathways[0].leadingEdgeGenes).toEqual(['TP53', 'CDKN1A']);
+  });
+
+  it('captures optional report provenance fields from the Project sheet', () => {
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(
+      workbook,
+      XLSX.utils.json_to_sheet([
+        {
+          project_title: 'Example study',
+          contrast_name: 'Drug_vs_Control',
+          condition_a: 'Control',
+          condition_b: 'Drug',
+          species: 'human',
+          dataset_identifier: 'GSE999999',
+          contrast_definition: 'Drug versus Control',
+          sample_group_source: 'Series matrix parsing',
+          batch_handling_rule: 'patient_id included in design',
+          analysis_timestamp: '2026-03-11T00:00:00.000Z',
+          git_commit: 'deadbeef',
+          reference_asset_version: 'reactome-2830.hallmark-0.string-700.huri-15722.mode-leading-edge-only',
+          notes: 'paper pipeline test',
+        },
+      ]),
+      'Project',
+    );
+    XLSX.utils.book_append_sheet(
+      workbook,
+      XLSX.utils.json_to_sheet([
+        {
+          gene_symbol: 'TP53',
+          log2fc: -1.5,
+          padj: 0.001,
+          pvalue: 0.00001,
+          rank_metric: -8.5,
+          condition_a_mean: 10.1,
+          condition_b_mean: 7.2,
+        },
+      ]),
+      'Genes',
+    );
+    XLSX.utils.book_append_sheet(
+      workbook,
+      XLSX.utils.json_to_sheet([
+        {
+          pathway_name: 'HALLMARK_P53_PATHWAY',
+          collection: 'Hallmark',
+          nes: 2.0,
+          padj: 0.01,
+          leading_edge_genes: 'TP53',
+        },
+      ]),
+      'Pathways',
+    );
+
+    const buffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
+    const result = parseWorkbookBuffer(buffer);
+
+    expect(result.viewerData?.provenance?.datasetIdentifier).toBe('GSE999999');
+    expect(result.viewerData?.provenance?.batchHandlingRule).toBe('patient_id included in design');
+    expect(result.viewerData?.provenance?.gitCommit).toBe('deadbeef');
+    expect(result.viewerData?.provenance?.notes).toBe('paper pipeline test');
+  });
+
+  it('keeps batch labels without inferring an applied statistical adjustment', () => {
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(
+      workbook,
+      XLSX.utils.json_to_sheet([
+        {
+          project_title: 'Sample metadata study',
+          contrast_name: 'Drug_vs_Control',
+          condition_a: 'Control',
+          condition_b: 'Drug',
+          species: 'human',
+        },
+      ]),
+      'Project',
+    );
+    XLSX.utils.book_append_sheet(
+      workbook,
+      XLSX.utils.json_to_sheet([
+        {
+          gene_symbol: 'TP53',
+          log2fc: -1.5,
+          padj: 0.001,
+          pvalue: 0.00001,
+          rank_metric: -8.5,
+          condition_a_mean: 10.1,
+          condition_b_mean: 7.2,
+        },
+      ]),
+      'Genes',
+    );
+    XLSX.utils.book_append_sheet(
+      workbook,
+      XLSX.utils.json_to_sheet([
+        {
+          pathway_name: 'HALLMARK_P53_PATHWAY',
+          collection: 'Hallmark',
+          nes: 2.0,
+          padj: 0.01,
+          leading_edge_genes: 'TP53',
+        },
+      ]),
+      'Pathways',
+    );
+    XLSX.utils.book_append_sheet(
+      workbook,
+      XLSX.utils.json_to_sheet([{ sample_id: 'S1', group: 'A', batch: 'Batch_1' }]),
+      'Samples',
+    );
+
+    const buffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
+    const result = parseWorkbookBuffer(buffer);
+
+    expect(result.viewerData?.samplesById?.S1.batch).toBe('Batch_1');
+    expect(result.viewerData?.provenance?.batchHandlingRule).toBeUndefined();
+    expect(result.viewerData?.evidence?.analysis.designFormula).toBeNull();
   });
 
   it('reports a missing sheet as an error', () => {
@@ -840,7 +1212,7 @@ describe('parseWorkbookBuffer', () => {
       result.issues.some(
         (issue) =>
           issue.level === 'warning' &&
-          issue.message.includes('Unrecognized gene symbol "FAKEGENE123" skipped.'),
+          issue.message.includes('Unrecognized gene symbol "FAKEGENE123" omitted from the network'),
       ),
     ).toBe(true);
   });

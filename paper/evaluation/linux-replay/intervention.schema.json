@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "One Linux replay manual intervention, JSON Lines 1.0",
+  "type": "object",
+  "required": ["timeUtc", "phase", "action", "reason", "outcome"],
+  "properties": {
+    "timeUtc": {"type": "string", "format": "date-time"},
+    "phase": {"type": "string"},
+    "action": {"type": "string"},
+    "reason": {"type": "string"},
+    "outcome": {"type": "string"}
+  }
+}

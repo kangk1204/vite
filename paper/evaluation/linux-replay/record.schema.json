@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PNV Linux replay status 1.0",
+  "type": "object",
+  "required": ["schemaVersion", "status", "operatorRole", "startedAt", "baseImage", "archiveSha256", "imageId", "platform", "phases"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "status": {"enum": ["running", "completed", "failed"]},
+    "operatorRole": {"enum": ["same-host-technical", "independent-operator"]},
+    "startedAt": {"type": "string", "format": "date-time"},
+    "endedAt": {"type": "string", "format": "date-time"},
+    "baseImage": {"type": "string"},
+    "archiveSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "imageId": {"type": "string"},
+    "platform": {"type": "object", "required": ["system", "release", "machine"]},
+    "phases": {"type": "array", "items": {"type": "object", "required": ["phase","startedAt","endedAt","elapsedSeconds","maxRssKiB","exitCode","command"]}},
+    "manualInterventionsFile": {"type": "string"},
+    "crossPlatform": {"enum": ["matched", "differences_observed"]},
+    "error": {"type": "string"}
+  }
+}

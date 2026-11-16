@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "frozenAt": "2026-11-10",
+  "description": "Byte-identical snapshot of reference assets used at implementation start; dates are freeze dates, not inferred upstream release dates.",
+  "artifacts": [
+    {
+      "path": "data/reference/ReactomePathways.gmt.zip",
+      "sha256": "0ef2e639619e3af31f6b17be909dc72c6420b4dc92d026f6c3849ccc307b286a",
+      "sizeBytes": 291075
+    },
+    {
+      "path": "src/reference/generated/aliases.json",
+      "sha256": "2d29e983daad87b8248d31a9dd5ab95a5a47b3151173e483da53c590f1ec3500",
+      "sizeBytes": 1967930
+    },
+    {
+      "path": "src/reference/generated/huri.json",
+      "sha256": "a8821d1ec21b9790d822945c310532ef1658a59834aadc905812927cbb508571",
+      "sizeBytes": 495484
+    },
+    {
+      "path": "src/reference/generated/metadata.json",
+      "sha256": "7ac3db438351fbdbff0e2d60a955e3334b973ae1120098e05ebcc196c0efd660",
+      "sizeBytes": 228
+    },
+    {
+      "path": "src/reference/generated/ncbi_gene_map.json",
+      "sha256": "da37a5cb39624ce8a40c59be3de06687a42588acb6a67689077430f8887524b7",
+      "sizeBytes": 1544473
+    },
+    {
+      "path": "src/reference/generated/pathways.json",
+      "sha256": "4db11bc44063c5b3c1c76182af2294ac8e85e196b443afe4cc5157ddc1e5c799",
+      "sizeBytes": 1721723
+    },
+    {
+      "path": "src/reference/generated/ppi.json",
+      "sha256": "1115f78f0b69dd50f710efa7798726aa75703f13a0abbf08da289aaa25af51e8",
+      "sizeBytes": 6580293
+    }
+  ]
+}

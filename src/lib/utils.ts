@@ -43,15 +43,20 @@ export function normalizeSheetRows(
   rows: Array<Record<string, unknown>>,
 ): Array<Record<string, unknown>> {
   return rows.map((row) => {
-    const normalized: Record<string, unknown> = {};
+    const normalized: Record<string, unknown> = Object.create(null);
 
     Object.entries(row).forEach(([key, value]) => {
       const normalizedKey = normalizeColumnKey(key);
-      if (!normalizedKey) {
+      if (
+        !normalizedKey ||
+        normalizedKey === '__proto__' ||
+        normalizedKey === 'constructor' ||
+        normalizedKey === 'prototype'
+      ) {
         return;
       }
 
-      if (!(normalizedKey in normalized) || normalized[normalizedKey] === '') {
+      if (!Object.prototype.hasOwnProperty.call(normalized, normalizedKey) || normalized[normalizedKey] === '') {
         normalized[normalizedKey] = value;
       }
     });

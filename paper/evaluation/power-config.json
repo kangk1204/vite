@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 2,
+  "seed": 20261116,
+  "startN": 24,
+  "simulations": 1000,
+  "alpha": 0.05,
+  "targetPower": 0.8,
+  "errorReduction": 0.1,
+  "baselineError": [
+    0.2,
+    0.35,
+    0.5
+  ],
+  "participantSD": [
+    0.5,
+    1.0
+  ],
+  "taskSD": [
+    0.5,
+    1.0
+  ],
+  "slopeSD": [
+    0.25,
+    0.5
+  ],
+  "status": "prospective-revision-awaiting-pilot-assumptions",
+  "casesPath": "paper/evaluation/case-manifest.seed.json",
+  "taskConditionSD": [
+    0,
+    0.25,
+    0.5
+  ],
+  "plannedAttritionFraction": 0.2,
+  "attritionScenarios": [
+    {
+      "name": "complete",
+      "withdrawalProbability": 0,
+      "partialLossProbability": 0
+    },
+    {
+      "name": "planning-loss",
+      "withdrawalProbability": 0.1,
+      "partialLossProbability": 0.1
+    }
+  ],
+  "calibrationSimulations": 10000,
+  "calibrationTypeIUpper": 0.06,
+  "calibrationCoverageLower": 0.94,
+  "pilotAssumptions": {
+    "frozen": false,
+    "completedParticipants": 0,
+    "recordPath": null,
+    "recordSha256": null
+  },
+  "estimand": "finite-task-equal-weight-risk-difference",
+  "scope": "The twelve frozen held-out contexts. Conditional participant-cluster inference with fixed task weights."
+}

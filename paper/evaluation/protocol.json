@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 2,
+  "status": "prospective-revision-not-preregistered",
+  "seed": 20261116,
+  "timeoutMs": 240000,
+  "primary": "Equal-case-weight full-minus-basic error-risk difference conditional on the frozen twelve held-out tasks",
+  "gates": {
+    "institutionalDetermination": "pending",
+    "institutionalReference": null,
+    "consentMaterialsApproved": false,
+    "completedPilotParticipants": 0,
+    "preregistrationUrl": null,
+    "protocolSha256": null,
+    "plannedSampleSize": null,
+    "powerArtifactSha256": null
+  },
+  "primaryInference": "Participant-cluster leave-one-out jackknife SE and t(N-1) two-sided test/95% interval",
+  "supportingModel": "Conditional logistic mixed-model odds ratio with fixed case effects",
+  "recruitment": {
+    "attritionFraction": 0.2,
+    "blockSize": 6,
+    "targetDefinition": "Participants with all four retained observed records in both primary conditions",
+    "replacementRule": "Whole blocks after current dispositions close; target or fixed cap determines stopping using availability only"
+  },
+  "withdrawal": {
+    "delete": "Exclude and purge named response/rating/key records and reanalyze retained observations",
+    "retainPartial": "Analyze only authorized observed rows and disclose scheduled-versus-observed availability",
+    "unknownLoss": "Record administrative missingness reason; no imputed outcome rows"
+  },
+  "caseManifest": "paper/evaluation/case-manifest.seed.json",
+  "publicationManifest": "paper/manifests/publication_2026_11_16.json"
+}

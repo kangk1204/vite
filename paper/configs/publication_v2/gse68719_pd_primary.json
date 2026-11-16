@@ -1,0 +1,51 @@
+{
+  "cohortKey": "gse68719_pd_primary",
+  "datasetIdentifier": "GSE68719",
+  "projectTitle": "Parkinson disease BA9 brain versus neurologically normal control brain",
+  "contrastName": "PD_vs_control",
+  "conditionA": "Neurologically normal control",
+  "conditionB": "Parkinson disease",
+  "contrastDefinition": "Parkinson disease BA9 postmortem brain tissue versus neurologically normal control BA9 tissue",
+  "sampleGroupSource": "Parsed from GEO sample titles (`C_*` controls, `P_*` Parkinson disease) together with GEO sample characteristics.",
+  "batchHandlingRule": "DESeq2 design = ~ post_mortem_interval_pmi + age_at_death + rna_integrity_number_rin + group; no additional batch factor.",
+  "notes": "Primary mental/neural manuscript cohort. Uses NCBI-generated raw counts and GEO series metadata.",
+  "rawCountsUrl": "https://www.ncbi.nlm.nih.gov/geo/download/?type=rnaseq_counts&acc=GSE68719&format=file&file=GSE68719_raw_counts_GRCh38.p13_NCBI.tsv.gz",
+  "seriesMatrixUrl": "https://ftp.ncbi.nlm.nih.gov/geo/series/GSE68nnn/GSE68719/matrix/GSE68719_series_matrix.txt.gz",
+  "rawCountsPath": "data/raw/GSE68719_raw_counts_GRCh38.p13_NCBI.tsv.gz",
+  "seriesMatrixPath": "data/raw/GSE68719_series_matrix.txt.gz",
+  "resultPrefix": "gse68719_pd_vs_control",
+  "figurePrefix": "gse68719_pd_primary",
+  "designFormula": "~ post_mortem_interval_pmi + age_at_death + rna_integrity_number_rin + group",
+  "numericCovariates": [
+    "post_mortem_interval_pmi",
+    "age_at_death",
+    "rna_integrity_number_rin"
+  ],
+  "groupRules": [
+    {
+      "group": "A",
+      "source": "title_clean",
+      "pattern": "^C_"
+    },
+    {
+      "group": "B",
+      "source": "title_clean",
+      "pattern": "^P_"
+    }
+  ],
+  "filterMinCount": 10,
+  "filterMinFraction": 0.15,
+  "figureTitles": {
+    "pca": "Parkinson disease and control BA9 samples separate in bulk RNA-seq space",
+    "volcano": "Differential expression in Parkinson disease BA9 cortex versus control",
+    "pathway": "Reactome pathways altered in Parkinson disease BA9 cortex"
+  },
+  "seed": 20261110,
+  "camera": true,
+  "referencePath": "data/reference/ReactomePathways.gmt.zip",
+  "bootstrapReplicates": 500,
+  "outputDir": "paper/outputs/publication_v2/gse68719_pd_primary",
+  "writeFigures": false,
+  "bootstrapWorkers": 4,
+  "bootstrapCheckpointDir": ".cache/bootstrap/publication-v2"
+}

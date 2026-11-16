@@ -14,6 +14,17 @@ export interface ProjectMeta {
   species: string;
 }
 
+export interface ViewerProvenance {
+  datasetIdentifier?: string;
+  contrastDefinition?: string;
+  sampleGroupSource?: string;
+  batchHandlingRule?: string;
+  analysisTimestamp?: string;
+  gitCommit?: string;
+  referenceAssetVersion?: string;
+  notes?: string;
+}
+
 export type ViewerSampleGroupKey = 'A' | 'B' | 'U';
 
 export interface ViewerSampleMeta {
@@ -27,12 +38,13 @@ export interface ViewerSampleMeta {
 export interface GeneRecord {
   symbol: string;
   originalSymbol: string;
-  log2fc: number;
-  padj: number;
-  pvalue: number;
-  rankMetric: number;
-  conditionAMean: number;
-  conditionBMean: number;
+  log2fc: number | null;
+  padj: number | null;
+  pvalue: number | null;
+  rankMetric: number | null;
+  conditionAMean: number | null;
+  conditionBMean: number | null;
+  statisticsReason?: string;
   sampleValues: Record<string, number>;
   label?: string;
   labelPriority?: number;
@@ -42,9 +54,12 @@ export interface PathwayRecord {
   key: string;
   pathwayId?: string;
   pathwayName: string;
+  searchNameNormalized?: string;
   collection: string;
-  nes: number;
-  padj: number;
+  nes: number | null;
+  padj: number | null;
+  statisticsReason?: string;
+  source?: { table: string; row: number };
   leadingEdgeGenes: string[];
   allGenes: string[];
   hasReferenceMembership: boolean;
@@ -52,19 +67,22 @@ export interface PathwayRecord {
   missingGenes: string[];
   nodes: ViewerNode[];
   edges: ViewerEdge[];
+  edgeIndices?: number[];
   enrichment: EnrichmentCurve;
 }
 
 export interface ViewerNode {
   id: string;
+  originalId?: string;
   label: string;
   labelPriority: number;
-  log2fc: number;
-  padj: number;
-  pvalue: number;
+  log2fc: number | null;
+  padj: number | null;
+  pvalue: number | null;
   sizeMetric: number;
-  conditionAMean: number;
-  conditionBMean: number;
+  conditionAMean: number | null;
+  conditionBMean: number | null;
+  statisticsReason?: string;
   sampleValues: Record<string, number>;
   isLeadingEdge: boolean;
 }
@@ -86,16 +104,118 @@ export interface EnrichmentPoint {
 }
 
 export interface EnrichmentCurve {
+  representation?: 'ranked-hits-v1';
+  unavailableReason?: string;
+  es?: number | null;
+  validation?: 'matches_recorded_es' | 'reconstructed_unverified' | 'unavailable';
   points: EnrichmentPoint[];
   hitIndices: number[];
   maxAbsValue: number;
 }
 
+export type VerificationStatus = 'verified_against_supplied_artifacts' | 'internally_consistent' | 'unverifiable' | 'mismatch';
+
+export interface MonteCarloInterval {
+  method: 'wilson';
+  level: 0.95;
+  lower: number | null;
+  upper: number | null;
+  denominator: number;
+}
+
+export interface DeliveryInspection {
+  schemaVersion: 1;
+  checker: 'pnv-delivery-v1';
+  checkedAt: string;
+  scope: 'supplied-files-and-recorded-fields';
+  verificationMode: 'supplied-files' | 'recorded-only';
+  request: {
+    claims: Record<string, string | number | null>;
+    artifacts: ReportEvidence['artifacts'];
+    additionalRecords: Array<{ name: string; path: string }>;
+    targetPathwayId?: string;
+  };
+  analysisRecord: Record<string, string | number | null>;
+  submittedAnalysisRecord?: Record<string, string | number | null>;
+  result: {
+    predicted: 'normal' | 'mismatch' | 'unverifiable';
+    integrityStatus: VerificationStatus;
+    checks: ReportEvidence['verification']['checks'];
+    files: Array<{ role: string; path: string; recordedSha256: string; recordedSize: number; suppliedSha256: string | null; suppliedSize: number | null }>;
+    documents: Array<{ name: string; path: string; available: boolean; sha256: string | null; sizeBytes: number | null }>;
+  };
+  sources: ReportEvidence['artifacts'];
+}
+
+export interface ReportEvidence {
+  runId: string | null;
+  deliveryInspection?: DeliveryInspection;
+  rankedGenes?: Array<{ gene: string; metric: number }>;
+  analysis: {
+    method: string;
+    versions: Record<string, string>;
+    contrast: { conditionA: string; conditionB: string };
+    designFormula: string | null;
+    seed: number | null;
+    alpha: number | null;
+    geneHypothesisCount: number | null;
+    pathwayHypothesisCount: number | null;
+    filterRule: string | null;
+    rankMetric: string | null;
+    lfcMethod: string | null;
+    adjustment: string | null;
+    rankingPolicy?: {
+      id: 'finite_original_wald_v1'; description: string;
+      includedGeneCount: number; excludedNonFiniteCount: number; includedCookOutlierCount: number;
+      includedIndependentFilterCount: number; includedNonconvergedCount: number;
+    };
+    cameraOptions?: {
+      interGeneCorrelation: 'estimated_per_set'; allowNegativeCorrelation: boolean; useRanks: boolean;
+      trendVar: boolean; directional: boolean; sort: boolean; adjustment: string; normalization: string; transformation: string;
+    };
+  };
+  fitDiagnostics?: {
+    summary: Record<string, number | boolean | null>;
+    warnings: Array<{ stage: string; type: string; message: string; affectedQuantity: string; geneAttribution: string; affectedGeneIds: string[] | null }>;
+    interpretation?: string;
+  };
+  verification: {
+    status: VerificationStatus;
+    checks: Array<{ id: string; status: 'pass' | 'fail' | 'unknown'; message: string }>;
+    limitations: string[];
+  };
+  artifacts: Array<{ role: string; path: string; sha256: string; sizeBytes: number }>;
+  pathways: Record<string, {
+    testedGenes?: string[];
+    testedSize?: number;
+    originalEs?: number | null;
+    camera?: { pvalue: number | null; padj: number | null; direction: string | null; nGenes?: number; correlation?: number | null };
+    designSensitivity?: Array<{ designFormula: string; nes: number | null; padj: number | null; source?: { table: string; row: number } }>;
+    bootstrap?: {
+      requested: number; valid: number; selected: number; directionMatches: number | null;
+      selectionFrequency: number | null; directionConsistency: number | null;
+      validFraction: number; warning: string | null;
+      selectionInterval?: MonteCarloInterval; directionInterval?: MonteCarloInterval;
+      denominatorReasons?: { fitFailed: number; notEligible: number; nonFiniteStatistic: number };
+      interpretation?: 'conditional_on_testable_resamples'; uncertaintyScope?: string;
+    };
+    source?: { table: string; row: number };
+  }>;
+  sourceTables?: Record<string, { columns: string[]; rows: Array<Array<string | number | boolean | null>> }>;
+}
+
 export interface ViewerData {
+  schemaVersion?: 1 | 2;
+  evidence?: ReportEvidence;
+  reportCondition?: 'full' | 'basic';
+  rankedGenes?: Array<{ gene: string; metric: number }>;
+  sharedEdges?: ViewerEdge[];
+  sampleValuesByGene?: Record<string, Record<string, number>>;
   project: ProjectMeta;
   builtAt: string;
   significantPadjThreshold: number;
   referenceSummary: ReferenceSummary;
+  provenance?: ViewerProvenance;
   issues: ValidationIssue[];
   pathways: PathwayRecord[];
   samplesById?: Record<string, ViewerSampleMeta>;
