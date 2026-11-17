@@ -1,0 +1,7 @@
+source('scripts/comparators/prepare_pd_delivery.R')
+s<-list(conditionA='Control',conditionB='Case',designFormula='~ group')
+x<-list(protocolVersion=1L,contractSha256=paste(rep('a',64),collapse=''),deliveryId='D02',targetPathwayId='R-HSA-449147',requestedContrast=list(conditionA='Case',conditionB='Control'),actualContrast=list(conditionA='Control',conditionB='Case'),actualDesign='~ group',declaredFiles=list(list(path='input',sha256='x')),deliveredFiles=list())
+f<-pd_context_fields(x,s);stopifnot(f$supplied_requested_group_A=='Case',f$supplied_case_id=='D02',f$supplied_delivered_files=='[]',!any(grepl('answer|prediction|conflict',names(f))))
+y<-x;y$prediction<-'mismatch';stopifnot(inherits(try(pd_context_fields(y,s),silent=TRUE),'try-error'))
+y<-x;y$actualContrast$conditionA<-'Different';stopifnot(inherits(try(pd_context_fields(y,s),silent=TRUE),'try-error'))
+cat('PD delivery raw-context mapping tests passed\n')

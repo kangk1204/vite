@@ -1,0 +1,180 @@
+{
+  "protocolVersion": 1,
+  "createdOn": "2026-11-17",
+  "timezone": "Asia/Seoul",
+  "status": "frozen_before_task_probing",
+  "registrationScope": "Internal pre-observation technical execution specification; not a registered human study or population benchmark",
+  "outputRoot": "paper/outputs/publication_2026_11_17/comparators",
+  "analysisRoot": "paper/outputs/publication_2026_11_16",
+  "dataset": "GSE68719",
+  "pathwayId": "R-HSA-449147",
+  "selectionRule": "Previously illustrated PD pathway with smallest original fgsea adjusted p-value, fixed before this task comparison",
+  "tools": [
+    "PNV",
+    "GeneTonic",
+    "RNAmel"
+  ],
+  "nativeInputPolicy": [
+    "Use the same frozen primary differential-expression and fgsea arrays, identifiers, NA patterns, contrast direction and testing families for all tools.",
+    "If a DESeqDataSet must be reconstructed, use the captured counts and already transformed metadata; prove same-environment 1e-8 parity before supplying the original arrays.",
+    "Supply additional common fields through documented native annotation/contrast inputs where supported and record exact mapping/preprocessing. Do not patch a competitor renderer or invent a custom template.",
+    "Give every tool identical case-specific companion evidence bytes and a manifest. A missing native affordance describes the prepared report configuration, not whole-tool incapability.",
+    "Native HTML and unique companion byte sizes are descriptive; human effort, speed and interpretation accuracy are unmeasured."
+  ],
+  "observations": {
+    "unit": "Tool by task component by delivery",
+    "nativeRoutes": [
+      "visible_native_report",
+      "documented_native_export",
+      "embedded_machine_record",
+      "not_exposed_in_tested_report",
+      "not_assessed",
+      "execution_error"
+    ],
+    "companionRoutes": [
+      "shared_companion",
+      "missing_from_delivery",
+      "not_required",
+      "execution_error"
+    ],
+    "semanticAnswers": [
+      "supported_by_supplied_records",
+      "conflicting_supplied_records",
+      "unverifiable_from_delivery",
+      "biological_truth_not_established",
+      "execution_error"
+    ],
+    "rules": [
+      "Keep access route separate from semantic judgment; biological truth not established can be the correct answer.",
+      "Record multipart tasks per component, with actual values, source row/key, access route, screenshot/selector or export receipt and limits.",
+      "Hidden JSON extraction is an embedded machine record, not a visible report control.",
+      "Expected numerical values derive from frozen source arrays previously validated by independent package calls; delivery truth derives independently from the declared transformations, not the PNV checker prediction.",
+      "Do not provide an answer-key summary as the companion. Supply underlying original evidence.",
+      "No weighted feature total, overall winner, task-time comparison, diagnostic accuracy estimate or participant-effect estimate."
+    ]
+  },
+  "deliveries": {
+    "base": "Original matched PD statistical results, captured design and complete shared evidence.",
+    "consistent": "Original supplied files and requested contrast agree with captured execution records.",
+    "contrast_conflict": "Retain original arrays and actual execution records; reverse only requested handoff contrast, identically for every tool.",
+    "missing_required_file": "Retain original arrays; omit the same declared required input artifact from each delivered file set and disk. Do not silently recover it from the development workspace.",
+    "coherent_record_only": "Separate internally consistent supplied symbolic-label records with no independent specimen-label evidence. Record-only inspection for ALL tools; do not reuse an original-label document as hidden truth. Internal consistency and biological truth remain distinct."
+  },
+  "tasks": [
+    {
+      "id": "T01",
+      "delivery": "base",
+      "question": "Locate the original pathway result",
+      "components": [
+        "pathway_identifier",
+        "original_NES",
+        "original_adjusted_pvalue"
+      ]
+    },
+    {
+      "id": "T02",
+      "delivery": "base",
+      "question": "Identify fitted design and positive comparison direction",
+      "components": [
+        "actual_design",
+        "contrast_direction",
+        "group_label_mapping"
+      ]
+    },
+    {
+      "id": "T03",
+      "delivery": "base",
+      "question": "Trace original tested membership and ES agreement",
+      "components": [
+        "tested_gene_count",
+        "exact_tested_gene_identifiers",
+        "original_rank_universe",
+        "original_ES",
+        "reconstruction_agreement"
+      ]
+    },
+    {
+      "id": "T04",
+      "delivery": "base",
+      "question": "Locate the same-pathway group-only result and its model",
+      "components": [
+        "group_only_design",
+        "group_only_NES",
+        "group_only_adjusted_pvalue",
+        "group_only_source_row"
+      ]
+    },
+    {
+      "id": "T05",
+      "delivery": "base",
+      "question": "Locate separate CAMERA results and test identity",
+      "components": [
+        "CAMERA_direction",
+        "CAMERA_adjusted_pvalue",
+        "CAMERA_test_identity",
+        "CAMERA_source_row"
+      ]
+    },
+    {
+      "id": "T06",
+      "delivery": "base",
+      "question": "Read resampling summaries and actual denominators",
+      "components": [
+        "selected_count",
+        "testable_count",
+        "requested_repetitions",
+        "direction_agreement_count",
+        "conditional_frequency_meaning"
+      ]
+    },
+    {
+      "id": "T07",
+      "delivery": "consistent",
+      "question": "Check artifact and requested-contrast agreement",
+      "components": [
+        "file_agreement",
+        "contrast_agreement",
+        "verification_scope"
+      ]
+    },
+    {
+      "id": "T08",
+      "delivery": "contrast_conflict",
+      "question": "Identify conflicting requested contrast without changing inference",
+      "components": [
+        "requested_contrast",
+        "actual_contrast",
+        "conflict_state",
+        "original_statistics_preserved"
+      ]
+    },
+    {
+      "id": "T09",
+      "delivery": "missing_required_file",
+      "question": "Distinguish unavailable input verification from statistical non-significance",
+      "components": [
+        "omitted_required_artifact",
+        "unverifiable_state",
+        "original_statistics_preserved"
+      ]
+    },
+    {
+      "id": "T10",
+      "delivery": "coherent_record_only",
+      "question": "Determine whether consistent records authenticate biological labels",
+      "components": [
+        "internal_consistency",
+        "absence_of_independent_label_evidence",
+        "biological_truth_not_established"
+      ],
+      "nativeReportScope": "not_assessed_record_only_control_for_all_tools"
+    }
+  ],
+  "limitations": [
+    "Developer-defined audit tasks intentionally cover PNV's intended use; they are not representative of all pathway exploration or users.",
+    "Freezing before probes prevents post-probe task edits, not task-selection bias.",
+    "Versions, supported input mapping and report configuration bound the findings; custom templates and untested functions may expose additional capabilities.",
+    "Equal companion access preserves information; an access-route difference is not an observed time saving or interpretation-error reduction.",
+    "Constructed deliveries and record-only controls do not estimate diagnostic sensitivity or specificity."
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "scope": "technical_software_observations_not_human_study",
+  "baseSoftwareRevision": "036ad2f5b9404b6c981bd0c1657f8b56fea89fe6",
+  "releaseTag": "matched-evaluation-2026-11-17",
+  "dataArchive": {
+    "name": "PNV-matched-evaluation-93561c07957d.zip",
+    "bytes": 291425549,
+    "sha256": "5c2eb7cb902a2690d081220e8dfefb950aa5d0be1ab2ebeefc933f33824a5dee",
+    "url": "https://github.com/kangk1204/vite/releases/download/matched-evaluation-2026-11-17/PNV-matched-evaluation-93561c07957d.zip"
+  },
+  "taskContractSha256": "114bdfb32db4be13755fb720c3769742bb4f2a92ca9465feac4597985f75a09d",
+  "resultsSha256": "87fa812e0acaa243c6b6be5ed9b4330e72ff16a8ed6f00bb84290bd66db960f7",
+  "humanObservations": 0,
+  "limitations": [
+    "Developer-defined audit tasks, not all pathway analysis functions.",
+    "No participant accuracy, task-time or diagnostic-accuracy estimate.",
+    "New evaluation code/data are separate from the unchanged analysed software revision."
+  ]
+}
